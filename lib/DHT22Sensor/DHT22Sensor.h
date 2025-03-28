@@ -10,11 +10,9 @@ public:
     void begin();
     float readTemperature();
     float readHumidity();
-    bool hasError();
 private:
     int dhtPin;
     DHT dht;
-    bool errorFlag;
 };
 
 #endif
