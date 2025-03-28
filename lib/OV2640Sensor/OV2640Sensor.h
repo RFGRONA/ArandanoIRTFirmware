@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include "esp_camera.h"
+#include "esp_heap_caps.h"
 
 class OV2640Sensor {
 public:

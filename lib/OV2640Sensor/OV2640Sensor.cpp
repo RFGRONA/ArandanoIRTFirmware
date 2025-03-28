@@ -20,9 +20,7 @@
 #define HREF_GPIO_NUM   7
 #define PCLK_GPIO_NUM   13
 
-OV2640Sensor::OV2640Sensor() {
-  // Constructor (actualmente vacío)
-}
+OV2640Sensor::OV2640Sensor() {}
 
 bool OV2640Sensor::begin() {
   camera_config_t config;
@@ -45,34 +43,34 @@ bool OV2640Sensor::begin() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_QVGA;     // Resolución baja para pruebas.
-  config.pixel_format = PIXFORMAT_JPEG;   // JPEG para la imagen.
+  config.frame_size = FRAMESIZE_VGA;     
+  config.pixel_format = PIXFORMAT_JPEG;   
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-  config.fb_location = CAMERA_FB_IN_DRAM;  // Usar DRAM si no se cuenta con PSRAM.
-  config.jpeg_quality = 10;               // Calidad JPEG (10 = buena calidad).
+  config.fb_location = CAMERA_FB_IN_PSRAM;  
+  config.jpeg_quality = 10;               
   config.fb_count = 1;
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("Error al inicializar la cámara: 0x%x\n", err);
+    //Serial.printf("Error al inicializar la cámara: 0x%x\n", err);
     return false;
   }
-  Serial.println("Cámara inicializada");
+  // Serial.println("Cámara inicializada");
   return true;
 }
 
 uint8_t* OV2640Sensor::captureJPEG(size_t &length) {
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
-    Serial.println("Error al capturar imagen");
+    // Serial.println("Error al capturar imagen");
     length = 0;
     return nullptr;
   }
 
   // Se crea una copia del buffer para que el caller tenga acceso a los datos
-  uint8_t *jpegData = (uint8_t *)malloc(fb->len);
+  uint8_t *jpegData = (uint8_t *)ps_malloc(fb->len);
   if (!jpegData) {
-    Serial.println("Error al asignar memoria para la imagen");
+    // Serial.println("Error al asignar memoria para la imagen");
     length = 0;
     esp_camera_fb_return(fb);
     return nullptr;
@@ -82,12 +80,12 @@ uint8_t* OV2640Sensor::captureJPEG(size_t &length) {
   length = fb->len;
   
   esp_camera_fb_return(fb);
-  Serial.printf("Imagen capturada: %d bytes\n", length);
+  // Serial.printf("Imagen capturada: %d bytes\n", length);
   
   return jpegData;
 }
 
 void OV2640Sensor::end() {
   esp_camera_deinit();
-  Serial.println("Cámara desinicializada");
+  // Serial.println("Cámara desinicializada");
 }
