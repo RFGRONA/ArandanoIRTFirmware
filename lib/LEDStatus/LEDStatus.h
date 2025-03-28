@@ -6,13 +6,16 @@
 
 // Estados definidos para el LED
 enum LEDState {
+  ALL_OK,        // Todo ok / en reposo
+  OFF,           // Apagado
   ERROR_AUTH,    // Error al autenticar
   ERROR_SEND,    // Error al enviar datos
   ERROR_SENSOR,  // Error en algún sensor
   ERROR_DATA,    // Error en los datos
   TAKING_DATA,   // Tomando datos
   SENDING_DATA,  // Enviando datos
-  ALL_OK         // Todo ok / en reposo
+  CONNECTING_WIFI,// Conectando a WiFi
+  ERROR_WIFI    // Error al conectar a WiFi
 };
 
 class LEDStatus {
