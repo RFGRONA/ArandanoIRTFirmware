@@ -18,14 +18,19 @@ public:
     // Retorna un puntero al array de datos térmicos (32x24)
     float* getThermalData();
     
-    void printRawData(Stream &output);
-    void printSimulatedHeatmap(Stream &output);
+    // Retorna la temperatura promedio de la última trama
+    float getAverageTemperature();
+    
+    // Retorna la temperatura máxima de la última trama
+    float getMaxTemperature();
+    
+    // Retorna la temperatura mínima de la última trama
+    float getMinTemperature();
     
 private:
     Adafruit_MLX90640 mlx;
     float frame[32 * 24];
-    TwoWire &_wire;  
-    char temperaturaACaracter(float temp);
+    TwoWire &_wire;
 };
 
 #endif
