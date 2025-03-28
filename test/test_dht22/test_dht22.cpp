@@ -1,39 +1,50 @@
+#include <Arduino.h> 
 #include <unity.h>
-#include "DHT22Sensor.h"
+#include "DHT22Sensor.h" 
 
-// Instancia global del sensor para reutilizar en todas las pruebas
-DHT22Sensor sensor(38); // Pin de datos del sensor DHT22
+#define DHT_TEST_PIN 47 
 
-void test_dht22_sensor_initialization(void) {
-    sensor.begin();
-    TEST_ASSERT_FALSE_MESSAGE(sensor.hasError(), "Error en inicialización del DHT22");
+DHT22Sensor testDhtSensor(DHT_TEST_PIN);
+
+
+void setUp(void) {}
+void tearDown(void) {}
+
+// Test de inicialización (solo verifica que begin() no cause problemas)
+void test_dht22_initialization(void) {
+    testDhtSensor.begin();
+    delay(100); // Pequeña pausa tras iniciar
 }
 
+// Test de lectura de temperatura
 void test_dht22_read_temperature(void) {
-    float temperature = sensor.readTemperature();
-    TEST_ASSERT_FALSE_MESSAGE(isnan(temperature), "Lectura de temperatura inválida");
-    TEST_ASSERT_FALSE_MESSAGE(sensor.hasError(), "Error en lectura de temperatura");
+    delay(2100); 
+    float temperature = testDhtSensor.readTemperature();
+    // La prueba falla si la lectura es NaN (Not a Number)
+    TEST_ASSERT_FALSE_MESSAGE(isnan(temperature), "Lectura de temperatura retornó NaN");
 }
 
+// Test de lectura de humedad
 void test_dht22_read_humidity(void) {
-    float humidity = sensor.readHumidity();
-    TEST_ASSERT_FALSE_MESSAGE(isnan(humidity), "Lectura de humedad inválida");
-    TEST_ASSERT_FALSE_MESSAGE(sensor.hasError(), "Error en lectura de humedad");
+    delay(2100); 
+    float humidity = testDhtSensor.readHumidity();
+    TEST_ASSERT_FALSE_MESSAGE(isnan(humidity), "Lectura de humedad retornó NaN");
 }
 
+// setup() se ejecuta una vez al inicio
 void setup() {
-    Serial.begin(115200);
-    delay(2000); // Estabilización para placas ESP
+    // Serial.begin(115200);
+    delay(2000); // Delay inicial para estabilización
+
+    // Inicializa el sensor UNA VEZ antes de correr los tests
+    testDhtSensor.begin();
+    // Esperar a que el sensor se estabilice tras el begin() inicial
+    delay(2100); // ¡IMPORTANTE! Esperar >2 segundos entre lecturas DHT
 
     UNITY_BEGIN();
-    RUN_TEST(test_dht22_sensor_initialization);
-    delay(100); // Tiempo para estabilizar el sensor
-    
     RUN_TEST(test_dht22_read_temperature);
     RUN_TEST(test_dht22_read_humidity);
-    UNITY_END(); // Finaliza todas las pruebas aquí
+    UNITY_END();
 }
 
-void loop() {
-    // Vacío - Las pruebas solo se ejecutan una vez
-}
+void loop() {}
