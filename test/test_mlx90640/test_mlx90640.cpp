@@ -3,8 +3,8 @@
 #include "MLX90640Sensor.h" 
 #include <Wire.h>
 
-#define SDA_PIN 42 
-#define SCL_PIN 41
+#define SDA_PIN 47
+#define SCL_PIN 21
 
 // Usar el mismo bus que el código principal
 TwoWire testWire(0);

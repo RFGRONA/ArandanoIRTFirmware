@@ -2,7 +2,7 @@
 #include <unity.h>
 #include "DHT22Sensor.h" 
 
-#define DHT_TEST_PIN 47 
+#define DHT_TEST_PIN 14
 
 DHT22Sensor testDhtSensor(DHT_TEST_PIN);
 
