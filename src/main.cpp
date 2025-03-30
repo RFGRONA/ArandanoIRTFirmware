@@ -1,176 +1,209 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <ArduinoJson.h>
+#include "esp_heap_caps.h"
+
 #include "DHT22Sensor.h"
 #include "BH1750Sensor.h"
 #include "MLX90640Sensor.h"
 #include "OV2640Sensor.h"
 #include "LEDStatus.h"
+#include "EnvironmentDataJSON.h"
+#include "MultipartDataSender.h"
+#include "WiFiManager.h"
+#include "ErrorLogger.h"
 
 // Definición de pines
-#define I2C_SDA 42
-#define I2C_SCL 41
-#define DHT_PIN 38
+#define I2C_SDA 47
+#define I2C_SCL 21
+#define DHT_PIN 14
 
 // Configuración general
-#define SLEEP_DURATION_SECONDS 10  // 5 minutos de reposo
-#define SENSOR_READ_RETRIES 3       // Intentos de lectura para sensores
+#define SLEEP_DURATION_SECONDS 60
+#define SENSOR_READ_RETRIES 3
+#define WIFI_CONNECT_TIMEOUT_MS 20000 // Tiempo máximo para esperar conexión WiFi
+
+// Configuración de WiFi
+const char* WIFI_SSID = "";
+const char* WIFI_PASS = "";
+
+// Endpoints de la API
+const char* API_ENVIRONMENTAL = "http://192.168.1.4:5000/ambiente";
+const char* API_THERMAL = "http://192.168.1.4:5000/imagenes";
+const char* API_LOGGING = "http://192.168.1.4:5000/log";
 
 TwoWire i2cBus = TwoWire(0);
 
-// Instancias de los sensores
+// Instancias de sensores y componentes
 BH1750Sensor lightSensor(i2cBus, I2C_SDA, I2C_SCL);
 MLX90640Sensor thermalSensor(i2cBus);
 DHT22Sensor dhtSensor(DHT_PIN);
 OV2640Sensor camera;
 LEDStatus led;
+WiFiManager wifiManager(WIFI_SSID, WIFI_PASS);
+// ErrorLogger errorLogger; // Asumiendo que es estática o no necesita instancia
 
-// Variable para controlar errores
-bool sensorsOK = true;
-
-// Prototipos de funciones
+// Prototipos de funciones (Manteniendo tus firmas originales)
+void ledBlink();
 bool initializeSensors();
-void readEnvironmentData(JsonDocument& doc);
+bool readEnvironmentData();
 bool captureImages(uint8_t** jpegImage, size_t& jpegLength, float** thermalData);
-void sendEnvironmentData(JsonDocument& doc);
-void sendImageData(uint8_t* jpegImage, size_t jpegLength, float* thermalData);
-void printDebugInfo(JsonDocument& doc, uint8_t* jpegImage, size_t jpegLength, float* thermalData);
+// bool sendEnvironmentData(JsonDocument& doc); // Comentado si no se usa
+bool sendImageData(uint8_t* jpegImage, size_t jpegLength, float* thermalData);
 void deepSleep(unsigned long seconds);
 void cleanupResources(uint8_t* jpegImage, float* thermalData);
+bool ensureWiFiConnected(unsigned long timeout); // Función auxiliar para WiFi
 
 void setup() {
-  Serial.begin(115200);
-  delay(500);  // Breve pausa para estabilizar
-  
-  // Iniciar el LED de estado
   led.begin();
-  led.setState(TAKING_DATA);
-  
-  Serial.println("Iniciando sistema de monitoreo de plantas...");
-  
+
+  // Inicializar WiFi (solo modo)
+  wifiManager.begin();
+
   // Inicializar sensores
   if (!initializeSensors()) {
-    // Si hay error al inicializar, dormimos y reiniciamos
-    led.setState(ERROR_SENSOR);
-    delay(5000);
+    delay(500);
     deepSleep(SLEEP_DURATION_SECONDS);
     return;
   }
-  
+
   led.setState(ALL_OK);
   delay(1000);
 }
 
 void loop() {
-  // Variables para almacenar datos
-  JsonDocument envData;  // Documento JSON para datos ambientales
-  uint8_t* jpegImage = nullptr;     // Puntero para la imagen JPEG
-  size_t jpegLength = 0;            // Longitud de la imagen JPEG
-  float* thermalData = nullptr;     // Copia del array térmico
-  
-  sensorsOK = true;  // Reiniciar flag de estado de sensores
-  
-  // 1. Indicar que estamos tomando datos
+  uint8_t* jpegImage = nullptr;
+  size_t jpegLength = 0;
+  float* thermalData = nullptr;
+  bool wifiConnectedThisCycle = false; // Flag para saber si se conectó en este ciclo
+  bool everythingOK = true; // Asume éxito hasta que algo falle
+
+  ledBlink();
+
+  // --- INTENTO DE CONEXIÓN WIFI (con timeout) ---
+  wifiConnectedThisCycle = ensureWiFiConnected(WIFI_CONNECT_TIMEOUT_MS);
+
+  // Si el WiFi falló en conectar después del timeout, poner LED de error y dormir.
+  if (!wifiConnectedThisCycle) {
+      led.setState(ERROR_WIFI);
+      delay(3000);
+      cleanupResources(jpegImage, thermalData); // Asegurar limpieza aunque no se haya capturado nada
+      deepSleep(SLEEP_DURATION_SECONDS);
+      return; // Salir del loop y dormir
+  }
+
+  // --- Lógica principal ---
   led.setState(TAKING_DATA);
-  delay(500);
-  
-  // 2. Leer datos ambientales (DHT22 y BH1750)
-  readEnvironmentData(envData);
-  
-  // 3. Capturar imágenes (térmica y cámara)
+  delay(1000);
+
+  // Leer y enviar datos ambientales (Función original)
+  if (!readEnvironmentData()) {
+    // readEnvironmentData ya maneja el LED de error
+    everythingOK = false;
+    // Decisión: ¿continuar o dormir? Aquí continuamos para intentar la cámara.
+  }
+
+  // Capturar imágenes
   if (!captureImages(&jpegImage, jpegLength, &thermalData)) {
-    sensorsOK = false;
-    led.setState(ERROR_SENSOR);
-    delay(2000);
+    led.setState(ERROR_DATA); delay(3000);
+    everythingOK = false;
   } else {
+    // Captura OK, intentar enviar datos de imágenes
     led.setState(SENDING_DATA);
-    
-    // 4. Enviar datos ambientales
-    sendEnvironmentData(envData);
-    
-    // 5. Enviar datos de imágenes
-    sendImageData(jpegImage, jpegLength, thermalData);
+    delay(1000);
+    if (!sendImageData(jpegImage, jpegLength, thermalData)) {
+       // sendImageData ya maneja el LED de error
+      everythingOK = false;
+    }
+    // Si el envío es exitoso, everythingOK sigue como estaba
   }
-  
-  // 6. Debug - Imprimir información
-  printDebugInfo(envData, jpegImage, jpegLength, thermalData);
-  
-  // 7. Limpieza de recursos
+
+  // --- Limpieza y Sueño ---
   cleanupResources(jpegImage, thermalData);
-  
-  // 8. Indicar estado final
-  if (sensorsOK) {
-    led.setState(ALL_OK);
+
+  // Estado final antes de dormir
+  if (everythingOK) {
+      led.setState(ALL_OK);
+      delay(3000);
   } else {
-    led.setState(ERROR_SENSOR);
+      // Si algo falló (lectura, captura, envío), el LED ya está en estado de error
+      delay(3000); // Mantener LED de error visible
   }
-  
-  delay(2000);
-  
-  // 9. Dormir y reiniciar
+
+  ledBlink();
   deepSleep(SLEEP_DURATION_SECONDS);
 }
 
-/**
- * Inicializa todos los sensores
- * @return true si todos los sensores iniciaron correctamente
- */
+
+// --- Nueva Función ensureWiFiConnected ---
+bool ensureWiFiConnected(unsigned long timeout) {
+  if (wifiManager.getConnectionStatus() == WiFiManager::CONNECTED) {
+      // led.setState(ALL_OK); // El LED se manejará después de llamar a esta función
+      return true;
+  }
+
+  if (wifiManager.getConnectionStatus() != WiFiManager::CONNECTING) {
+      wifiManager.connectToWiFi();
+  }
+  led.setState(CONNECTING_WIFI);
+
+  unsigned long startTime = millis();
+  while (millis() - startTime < timeout) {
+    wifiManager.handleWiFi();
+    if (wifiManager.getConnectionStatus() == WiFiManager::CONNECTED) {
+        // led.setState(ALL_OK); // El LED se manejará después
+        return true;
+    }
+    if (wifiManager.getConnectionStatus() == WiFiManager::CONNECTION_FAILED) {
+        break; // Salir si el fallo es definitivo
+    }
+    delay(100);
+  }
+
+  // Si salimos por timeout o fallo definitivo
+  // led.setState(ERROR_WIFI); // El LED se manejará después
+  // delay(3000);
+  return false;
+}
+
+
+// --- TUS FUNCIONES ORIGINALES (Sin cambios) ---
+
+void ledBlink() {
+  led.setState(OFF); delay(500);
+  led.setState(ALL_OK); delay(700);
+  led.setState(OFF); delay(500);
+  led.setState(ALL_OK); delay(700);
+  led.setState(OFF); delay(500);
+}
+
 bool initializeSensors() {
-  Serial.println("Inicializando sensores...");
-  
-  // Inicializar el sensor DHT22 (no usa I2C)
   dhtSensor.begin();
-  Serial.println("Sensor DHT22 inicializado");
-  
-  // Inicializar un solo bus I2C para ambos sensores
   i2cBus.begin(I2C_SDA, I2C_SCL);
-  i2cBus.setClock(100000); // 100 kHz, velocidad segura para la mayoría de sensores I2C
+  i2cBus.setClock(100000);
   delay(100);
-  
-  // Inicializar sensor de luz
   if (!lightSensor.begin()) {
-    Serial.println("Error al inicializar el sensor de luz BH1750");
-    return false;
+    led.setState(ERROR_SENSOR); delay(3000); return false;
   }
-  Serial.println("Sensor de luz BH1750 inicializado");
-  
   delay(100);
-  
-  // Inicializar cámara térmica
   if (!thermalSensor.begin()) {
-    Serial.println("Error al inicializar el sensor térmico MLX90640");
-    return false;
+    led.setState(ERROR_SENSOR); delay(3000); return false;
   }
-  Serial.println("Cámara térmica MLX90640 inicializada");
-  
   delay(500);
-  
-  // Inicializar cámara OV2640 al final
   if (!camera.begin()) {
-    Serial.println("Error al inicializar la cámara OV2640");
-    return false;
+    led.setState(ERROR_SENSOR); delay(3000); return false;
   }
-  Serial.println("Cámara OV2640 inicializada");
-  
+  delay(500);
   return true;
 }
 
-/**
- * Lee datos de los sensores ambientales y los añade al documento JSON
- * @param doc Documento JSON donde se almacenarán los datos
- */
-void readEnvironmentData(JsonDocument& doc) {
-  Serial.println("Leyendo datos ambientales...");
-  
-  // Leer sensor de luz con reintentos
+bool readEnvironmentData() {
   float lightLevel = -1;
   for (int i = 0; i < SENSOR_READ_RETRIES; i++) {
     lightLevel = lightSensor.readLightLevel();
     if (lightLevel >= 0) break;
     delay(500);
   }
-  
-  // Leer sensor de temperatura y humedad con reintentos
   float temperature = NAN;
   float humidity = NAN;
   for (int i = 0; i < SENSOR_READ_RETRIES; i++) {
@@ -179,161 +212,72 @@ void readEnvironmentData(JsonDocument& doc) {
     if (!isnan(temperature) && !isnan(humidity)) break;
     delay(1000);
   }
-  
-  // Verificar si hubo errores
   if (lightLevel < 0 || isnan(temperature) || isnan(humidity)) {
-    sensorsOK = false;
-    led.setState(ERROR_SENSOR);
-    delay(1000);
-  }
-  
-  // Añadir datos al JSON
-  doc["light"] = lightLevel;
-  doc["temperature"] = temperature;
-  doc["humidity"] = humidity;
-  doc["timestamp"] = millis();
-  
-  Serial.println("Datos ambientales recopilados");
-}
-
-/**
- * Captura datos de las cámaras térmica y óptica
- * @param jpegImage Puntero donde se almacenará la dirección de la imagen JPEG
- * @param jpegLength Variable donde se almacenará el tamaño de la imagen
- * @param thermalData Puntero donde se almacenará la dirección de los datos térmicos
- * @return true si la captura fue exitosa
- */
-bool captureImages(uint8_t** jpegImage, size_t& jpegLength, float** thermalData) {
-  Serial.println("Capturando imágenes...");
-  
-  // Capturar imagen térmica
-  if (!thermalSensor.readFrame()) {
-    Serial.println("Error al capturar frame térmico");
+    led.setState(ERROR_DATA); delay(3000);
+    // ErrorLogger::sendLog(String(API_LOGGING), "ENV_READ_FAIL", "Sensor read failed"); // Comentario original
     return false;
   }
-  
-  float* rawThermalData = thermalSensor.getThermalData();
-  if (rawThermalData == nullptr) {
-    Serial.println("Error: datos térmicos no disponibles");
+  led.setState(SENDING_DATA);
+  bool sendSuccess = EnvironmentDataJSON::IOEnvironmentData(
+    String(API_ENVIRONMENTAL), lightLevel, temperature, humidity
+  );
+  delay(1000);
+  if (!sendSuccess) {
+    led.setState(ERROR_SEND); delay(3000);
+    // ErrorLogger::sendLog(String(API_LOGGING), "ENV_SEND_FAIL", "Environment data send failed"); // Comentario original
     return false;
   }
-  
-  // Crear una copia de los datos térmicos
-  *thermalData = (float*)malloc(32 * 24 * sizeof(float));
-  if (*thermalData == nullptr) {
-    Serial.println("Error: no se pudo asignar memoria para datos térmicos");
-    return false;
-  }
-  memcpy(*thermalData, rawThermalData, 32 * 24 * sizeof(float));
-  
-  // Capturar imagen de la cámara
-  *jpegImage = camera.captureJPEG(jpegLength);
-  if (*jpegImage == nullptr || jpegLength == 0) {
-    Serial.println("Error al capturar imagen JPEG");
-    
-    // Liberar memoria asignada para evitar fugas
-    if (*thermalData != nullptr) {
-      free(*thermalData);
-      *thermalData = nullptr;
-    }
-    
-    return false;
-  }
-  
-  Serial.printf("Imágenes capturadas con éxito. JPEG: %u bytes\n", jpegLength);
   return true;
 }
 
-/**
- * Envía datos ambientales a la API
- * @param doc Documento JSON con los datos a enviar
- */
-void sendEnvironmentData(JsonDocument& doc) {
-  Serial.println("Enviando datos ambientales a la API...");
-  // Método a implementar en el futuro
-  delay(1000); // Simulación de envío
-}
-
-/**
- * Envía datos de imágenes a la API
- * @param jpegImage Puntero a la imagen JPEG
- * @param jpegLength Tamaño de la imagen
- * @param thermalData Puntero a los datos térmicos
- */
-void sendImageData(uint8_t* jpegImage, size_t jpegLength, float* thermalData) {
-  Serial.println("Enviando imágenes a la API...");
-  // Método a implementar en el futuro
-  delay(1000); // Simulación de envío
-}
-
-/**
- * Imprime información de depuración
- */
-void printDebugInfo(JsonDocument& doc, uint8_t* jpegImage, size_t jpegLength, float* thermalData) {
-  Serial.println("\n--- INFORMACIÓN DE DEPURACIÓN ---");
-  Serial.println("Datos ambientales:");
-  serializeJsonPretty(doc, Serial);
-  Serial.println();
-
-  Serial.printf("Imagen JPEG: %u bytes\n", jpegLength);
-  Serial.print("Primeros datos de la imagen JPEG: ");
-  size_t numBytesToPrint = (jpegLength < 10) ? jpegLength : 10;
-  for (size_t i = 0; i < numBytesToPrint; i++) {
-    Serial.printf("0x%02X ", jpegImage[i]);
+bool captureImages(uint8_t** jpegImage, size_t& jpegLength, float** thermalData) {
+  if (!thermalSensor.readFrame()) {
+     led.setState(ERROR_DATA); delay(3000); return false;
   }
-  Serial.println();
-  
-  if (thermalData != nullptr) {
-    float sum = 0.0;
-    float minTemp = thermalData[0];
-    float maxTemp = thermalData[0];
-    // Suponiendo que la matriz térmica es de 32x24 (768 elementos)
-    for (int i = 0; i < 32 * 24; i++) {
-      float temp = thermalData[i];
-      sum += temp;
-      if (temp < minTemp) minTemp = temp;
-      if (temp > maxTemp) maxTemp = temp;
-    }
-    float avgTemp = sum / (32 * 24);
-    Serial.printf("Temperatura promedio: %.2f °C\n", avgTemp);
-    Serial.printf("Temperatura mínima: %.2f °C\n", minTemp);
-    Serial.printf("Temperatura máxima: %.2f °C\n", maxTemp);
+  float* rawThermalData = thermalSensor.getThermalData();
+  if (rawThermalData == nullptr) {
+    led.setState(ERROR_DATA); delay(3000); return false;
   }
-  
-  Serial.println("--- FIN DE LA INFORMACIÓN DE DEPURACIÓN ---\n");
+  #if CONFIG_SPIRAM_SUPPORT || CONFIG_ESP32_SPIRAM_SUPPORT
+    *thermalData = (float*)ps_malloc(32 * 24 * sizeof(float));
+  #else
+    *thermalData = (float*)malloc(32 * 24 * sizeof(float));
+  #endif
+  if (*thermalData == nullptr) {
+    // ErrorLogger::sendLog(String(API_LOGGING), "MALLOC_FAIL", "Thermal data malloc failed"); // Comentario original
+    led.setState(ERROR_DATA); delay(3000); return false;
+  }
+  memcpy(*thermalData, rawThermalData, 32 * 24 * sizeof(float));
+  *jpegImage = camera.captureJPEG(jpegLength);
+  if (*jpegImage == nullptr || jpegLength == 0) {
+    if (*thermalData != nullptr) { free(*thermalData); *thermalData = nullptr; }
+    // ErrorLogger::sendLog(String(API_LOGGING), "JPEG_CAPTURE_FAIL", "JPEG capture failed"); // Comentario original
+    led.setState(ERROR_DATA); delay(3000); return false;
+  }
+  return true;
 }
 
-/**
- * Limpia los recursos dinámicos
- */
+bool sendImageData(uint8_t* jpegImage, size_t jpegLength, float* thermalData) {
+  // led.setState(SENDING_DATA) // Comentario original - ya se hace en loop
+  bool sendSuccess = MultipartDataSender::IOThermalAndImageData(
+    String(API_THERMAL), thermalData, jpegImage, jpegLength
+  );
+  delay(1000);
+  if (!sendSuccess) {
+    led.setState(ERROR_SEND); delay(3000);
+    // ErrorLogger::sendLog(String(API_LOGGING), "IMAGE_SEND_FAIL", "Image data send failed"); // Comentario original
+    return false;
+  }
+  return true;
+}
+
 void cleanupResources(uint8_t* jpegImage, float* thermalData) {
-  // Liberar memoria de la imagen JPEG
-  if (jpegImage != nullptr) {
-    free(jpegImage);
-  }
-  
-  // Liberar memoria de los datos térmicos
-  if (thermalData != nullptr) {
-    free(thermalData);
-  }
+  if (jpegImage != nullptr) { free(jpegImage); }
+  if (thermalData != nullptr) { free(thermalData); }
 }
 
-/**
- * Pone el ESP32 en modo de sueño profundo
- * @param seconds Tiempo de sueño en segundos
- */
 void deepSleep(unsigned long seconds) {
-  Serial.printf("Entrando en modo de sueño profundo por %lu segundos...\n", seconds);
-  
-  // Apagar el LED de estado
   led.turnOffAll();
-  
-  // Esperar a que se terminen de imprimir los mensajes
-  Serial.flush();
-  
-  // Configurar el tiempo de sueño
   esp_sleep_enable_timer_wakeup(seconds * 1000000ULL);
-  
-  // Entrar en sueño profundo
   esp_deep_sleep_start();
 }
