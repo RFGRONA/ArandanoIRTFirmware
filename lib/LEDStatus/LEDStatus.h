@@ -4,40 +4,66 @@
 #include <Adafruit_NeoPixel.h>
 #include <Arduino.h>
 
-// Estados definidos para el LED
+/**
+ * @file LEDStatus.h
+ * @brief Manages a single WS2812 NeoPixel LED for status indication.
+ *
+ * Provides methods to initialize the LED and set its color based on
+ * predefined operational states. Assumes a single NeoPixel connected
+ * to a specific pin.
+ */
+
+/**
+ * @brief Defines the possible states the system can be in, represented by the LED color.
+ */
 enum LEDState {
-  ALL_OK,        // Todo ok / en reposo
-  OFF,           // Apagado
-  ERROR_AUTH,    // Error al autenticar
-  ERROR_SEND,    // Error al enviar datos
-  ERROR_SENSOR,  // Error en algún sensor
-  ERROR_DATA,    // Error en los datos
-  TAKING_DATA,   // Tomando datos
-  SENDING_DATA,  // Enviando datos
-  CONNECTING_WIFI,// Conectando a WiFi
-  ERROR_WIFI    // Error al conectar a WiFi
+  ALL_OK,         ///< Everything OK / Idle state (White).
+  OFF,            ///< LED turned off.
+  ERROR_AUTH,     ///< Authentication error (Red).
+  ERROR_SEND,     ///< Error sending data via HTTP (Yellow).
+  ERROR_SENSOR,   ///< Error initializing or reading a sensor (Purple).
+  ERROR_DATA,     ///< Error processing or capturing data (Cyan).
+  TAKING_DATA,    ///< Currently taking measurements/capturing images (Blue).
+  SENDING_DATA,   ///< Currently sending data via HTTP (Green).
+  CONNECTING_WIFI,///< Attempting to connect to WiFi (Orange).
+  ERROR_WIFI      ///< Failed to connect to WiFi (Pink).
 };
 
 class LEDStatus {
 public:
-  // Constructor: se utiliza el pin 48 y se asume un único LED WS2812
+  /**
+   * @brief Constructor for LEDStatus.
+   * Initializes the NeoPixel library for a single pixel on a predefined pin (see cpp file).
+   */
   LEDStatus();
 
-  // Inicializa el LED WS2812
+  /**
+   * @brief Initializes the NeoPixel LED.
+   * Sets up the pixel library and turns the LED off initially. Call once in setup.
+   */
   void begin();
 
-  // Establece el estado del LED según el enum
+  /**
+   * @brief Sets the LED color based on the specified system state.
+   * @param state The desired state from the LEDState enum.
+   */
   void setState(LEDState state);
 
-  // Apaga el LED
+  /**
+   * @brief Turns the NeoPixel LED off.
+   */
   void turnOffAll();
 
 private:
-  // Configuración fija: pin 48 y 1 LED
-  Adafruit_NeoPixel pixels;
+  Adafruit_NeoPixel pixels; ///< NeoPixel library instance.
 
-  // Establece el color del LED
+  /**
+   * @brief Sets the raw RGB color of the NeoPixel.
+   * @param r Red component (0-255).
+   * @param g Green component (0-255).
+   * @param b Blue component (0-255).
+   */
   void setColor(uint8_t r, uint8_t g, uint8_t b);
 };
 
-#endif
+#endif // LEDSTATUS_H
