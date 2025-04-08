@@ -1,50 +1,50 @@
-#include <Adafruit_NeoPixel.h>
+#include <Adafruit_NeoPixel.h>  // Include the Adafruit NeoPixel library to control WS2812 LEDs
 
-#define PIN 48        // Pin conectado al LED WS2812 (GPIO48)
-#define NUMPIXELS 1   // Número de LEDs NeoPixel en la tira (en este caso, solo 1 integrado)
+#define PIN 48                  // Define the pin connected to the WS2812 LED (GPIO48)
+#define NUMPIXELS 1             // Define the number of NeoPixel LEDs in the strip (in this case, only 1 integrated LED)
 
-Adafruit_NeoPixel pixels(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800); // Inicializa la biblioteca NeoPixel
+Adafruit_NeoPixel pixels(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);  // Initialize the NeoPixel library with the number of pixels, pin, and color format
 
 void setup() {
-  pixels.begin();           // Inicializa la tira NeoPixel.
-  pixels.clear();           // Apaga todos los LEDs inicialmente.
-  pixels.show();            // Envía el estado inicial a los LEDs.
-  delay(250);               // Pausa breve.
+  pixels.begin();            // Initialize the NeoPixel strip.
+  pixels.clear();            // Turn off all LEDs initially.
+  pixels.show();             // Send the initial state to the LEDs.
+  delay(250);                // Brief pause to allow the initial setup to complete.
 }
 
 void loop() {
+  // Red color
+  pixels.setPixelColor(0, pixels.Color(255, 0, 0));  // Set the color of the first LED (index 0) to red.
+  pixels.show();            // Send color data to the LEDs.
+  delay(1000);              // Wait for one second.
 
-  // Color rojo
-  pixels.setPixelColor(0, pixels.Color(255, 0, 0)); // Establece el color del primer LED (índice 0) a rojo.
-  pixels.show();          // Envía los datos de color a los LEDs.
-  delay(1000);            // Espera un segundo.
+  // Green color
+  pixels.setPixelColor(0, pixels.Color(0, 255, 0));  // Set the color of the first LED to green.
+  pixels.show();            // Send the updated color data to the LEDs.
+  delay(1000);              // Wait for one second.
 
-  // Color verde
-  pixels.setPixelColor(0, pixels.Color(0, 255, 0)); // Establece el color del primer LED a verde.
-  pixels.show();
-  delay(1000);
+  // Blue color
+  pixels.setPixelColor(0, pixels.Color(0, 0, 255));  // Set the color of the first LED to blue.
+  pixels.show();            // Send the updated color data to the LEDs.
+  delay(1000);              // Wait for one second.
 
-  // Color azul
-  pixels.setPixelColor(0, pixels.Color(0, 0, 255)); // Establece el color del primer LED a azul.
-  pixels.show();
-  delay(1000);
+  // Yellow color
+  pixels.setPixelColor(0, pixels.Color(255, 255, 0));  // Set the color of the first LED to yellow (red + green).
+  pixels.show();            // Send the updated color data to the LEDs.
+  delay(1000);              // Wait for one second.
 
-  pixels.setPixelColor(0, pixels.Color(255, 255, 0)); // Establece el color del primer LED (índice 0) a rojo.
-  pixels.show();          // Envía los datos de color a los LEDs.
-  delay(1000);            // Espera un segundo.
+  // Cyan color
+  pixels.setPixelColor(0, pixels.Color(0, 255, 255));  // Set the color of the first LED to cyan (green + blue).
+  pixels.show();            // Send the updated color data to the LEDs.
+  delay(1000);              // Wait for one second.
 
-  // Color verde
-  pixels.setPixelColor(0, pixels.Color(0, 255, 255)); // Establece el color del primer LED a verde.
-  pixels.show();
-  delay(1000);
+  // Magenta color
+  pixels.setPixelColor(0, pixels.Color(255, 0, 255));  // Set the color of the first LED to magenta (red + blue).
+  pixels.show();            // Send the updated color data to the LEDs.
+  delay(1000);              // Wait for one second.
 
-  // Color azul
-  pixels.setPixelColor(0, pixels.Color(255, 0, 255)); // Establece el color del primer LED a azul.
-  pixels.show();
-  delay(1000);
-
-  // Apagar el LED
-  pixels.clear();           // Apaga todos los LEDs.
-  pixels.show();
-  delay(1000);
+  // Turn off the LED
+  pixels.clear();           // Turn off all the LEDs.
+  pixels.show();            // Send the update to the LEDs.
+  delay(1000);              // Wait for one second.
 }
