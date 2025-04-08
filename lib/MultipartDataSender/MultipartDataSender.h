@@ -35,6 +35,33 @@ public:
         uint8_t* jpegImage,
         size_t jpegLength
     );
+
+private:
+    /**
+     * @brief Creates a JSON string from the thermal data array.
+     * @param thermalData Pointer to the float array (32x24) of temperatures.
+     * @return String containing the JSON payload, or empty string on error.
+     */
+    static String createThermalJson(float* thermalData);
+
+    /**
+     * @brief Builds the complete multipart/form-data payload.
+     * @param boundary The unique boundary string for the multipart request.
+     * @param thermalJson The JSON string representing the thermal data.
+     * @param jpegImage Pointer to the buffer containing JPEG data.
+     * @param jpegLength Size of the JPEG data in bytes.
+     * @return std::vector<uint8_t> containing the full payload, or empty vector on error.
+     */
+    static std::vector<uint8_t> buildMultipartPayload(const String& boundary, const String& thermalJson, uint8_t* jpegImage, size_t jpegLength);
+
+    /**
+     * @brief Performs the actual HTTP POST request with retries.
+     * @param apiUrl The target URL.
+     * @param boundary The multipart boundary string.
+     * @param payload The complete payload to send.
+     * @return True if the POST request receives a 2xx success code, False otherwise.
+     */
+    static bool performHttpPost(const String& apiUrl, const String& boundary, const std::vector<uint8_t>& payload);
 };
 
 #endif // MULTIPART_DATA_SENDER_H

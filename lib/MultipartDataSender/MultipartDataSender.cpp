@@ -3,7 +3,8 @@
 #include <vector> // Using std::vector to dynamically build the payload
 
 /**
- * @brief Static method implementation for sending thermal and image data.
+ * @brief Sends thermal data and a JPEG image via HTTP POST using multipart/form-data encoding.
+ * Orchestrates helper functions for JSON creation, payload building, and HTTP POSTing.
  */
 bool MultipartDataSender::IOThermalAndImageData(
     const String& apiUrl,
@@ -11,116 +12,167 @@ bool MultipartDataSender::IOThermalAndImageData(
     uint8_t* jpegImage,
     size_t jpegLength
 ) {
-    // --- Input Validation ---
+    // 1. Input Validation
     if (!thermalData || !jpegImage || jpegLength == 0) {
-        // Serial.println("Error: Invalid input data for sending."); // Optional debug
-        return false; // Cannot proceed with invalid data
+        #ifdef ENABLE_DEBUG_SERIAL
+          Serial.println("MultipartSender Error: Invalid input data.");
+        #endif
+        return false;
     }
 
-    // --- JSON Payload Creation (Thermal Data) ---
-    // Use JsonDocument (preferred over deprecated DynamicJsonDocument)
-    // Estimate capacity needed for 768 floats + JSON overhead. 4096 might be conservative.
-    JsonDocument doc; // Size will adjust, uses heap allocation.
+    // 2. Create Thermal JSON Payload
+    String thermalJsonString = createThermalJson(thermalData);
+    if (thermalJsonString.length() == 0) {
+        // Error logged within helper function
+        return false;
+    }
 
-    // Create the nested array for temperatures using the recommended syntax
+    // 3. Generate Boundary
+    String boundary = "----WebKitFormBoundary" + String(esp_random());
+
+    // 4. Build Multipart Payload
+    std::vector<uint8_t> payload = buildMultipartPayload(boundary, thermalJsonString, jpegImage, jpegLength);
+    if (payload.empty()) {
+        // Error logged within helper function (e.g., if vector couldn't reserve memory)
+        return false;
+    }
+
+    // 5. Perform HTTP POST Request
+    return performHttpPost(apiUrl, boundary, payload);
+}
+
+// --- MultipartDataSender Helper Function Implementations ---
+
+/**
+ * @brief Creates a JSON string from the thermal data array.
+ */
+/* static */ String MultipartDataSender::createThermalJson(float* thermalData) {
+    // Use JsonDocument (adjust capacity if needed, maybe calculate more precisely)
+    JsonDocument doc;
+    const size_t capacity = JSON_ARRAY_SIZE(32 * 24) + JSON_OBJECT_SIZE(1) + 20; // Estimate
+    // If using heap: JsonDocument doc(capacity);
+
     JsonArray tempArray = doc["temperatures"].to<JsonArray>();
     if (tempArray.isNull()) {
-        // Serial.println("Error: Failed to create JSON array."); // Optional debug
-        return false; // Failed to allocate or create array
+        #ifdef ENABLE_DEBUG_SERIAL
+          Serial.println("MultipartSender Error: Failed to create JSON array for thermal data.");
+        #endif
+        return ""; // Return empty string on failure
     }
 
-    // Copy thermal data into the JSON array
     const int totalPixels = 32 * 24;
     for(int i = 0; i < totalPixels; i++) {
         tempArray.add(thermalData[i]);
     }
 
-    // Serialize the JSON document to a String
-    String thermalJsonString;
-    serializeJson(doc, thermalJsonString);
-    // Clear the JsonDocument memory if it's large and won't be needed again soon
-    doc.clear();
+    String jsonString;
+    serializeJson(doc, jsonString);
+    return jsonString;
+}
 
-    // --- Multipart Payload Construction ---
-    // Generate a unique boundary string for this request
-    String boundary = "----WebKitFormBoundary" + String(esp_random());
-
-    // Use a std::vector<uint8_t> to build the binary payload efficiently
+/**
+ * @brief Builds the complete multipart/form-data payload as a byte vector.
+ */
+/* static */ std::vector<uint8_t> MultipartDataSender::buildMultipartPayload(
+    const String& boundary, const String& thermalJson, uint8_t* jpegImage, size_t jpegLength
+) {
     std::vector<uint8_t> payload;
-    // Reserve memory to minimize reallocations (estimate size)
-    payload.reserve(thermalJsonString.length() + jpegLength + 512); // Adjusted reservation slightly
+    // Reserve memory (consider a slightly safer estimation)
+    // Using thermalJson.length() which includes quotes, commas, etc.
+    size_t estimatedSize = thermalJson.length() + jpegLength + 512; // Headers, boundaries etc.
+    payload.reserve(estimatedSize);
 
-    // Helper lambda function to append String data to the byte vector
+    // Helper lambda to append String data
     auto appendString = [&payload](const String& str) {
         payload.insert(payload.end(), str.c_str(), str.c_str() + str.length());
     };
 
-    // -- Part 1: Thermal Data (JSON) --
+    // --- Part 1: Thermal Data (JSON) ---
     appendString("--" + boundary + "\r\n");
-    appendString("Content-Disposition: form-data; name=\"thermal\"\r\n"); // Field name "thermal"
-    appendString("Content-Type: application/json\r\n\r\n");          // Content type for JSON
-    appendString(thermalJsonString);                                 // The actual JSON string
-    appendString("\r\n");                                            // End of part
+    appendString("Content-Disposition: form-data; name=\"thermal\"\r\n");
+    appendString("Content-Type: application/json\r\n\r\n");
+    appendString(thermalJson);
+    appendString("\r\n");
 
-    // -- Part 2: Image Data (JPEG) --
+    // --- Part 2: Image Data (JPEG) ---
     appendString("--" + boundary + "\r\n");
-    appendString("Content-Disposition: form-data; name=\"image\"; filename=\"camera.jpg\"\r\n"); // Field name "image", filename "camera.jpg"
-    appendString("Content-Type: image/jpeg\r\n\r\n");                // Content type for JPEG
-    // Append the raw JPEG byte data directly
+    appendString("Content-Disposition: form-data; name=\"image\"; filename=\"camera.jpg\"\r\n");
+    appendString("Content-Type: image/jpeg\r\n\r\n");
+    // Append binary JPEG data
     payload.insert(payload.end(), jpegImage, jpegImage + jpegLength);
-    appendString("\r\n");                                            // End of part
+    appendString("\r\n");
 
-    // -- Closing Boundary --
-    appendString("--" + boundary + "--\r\n");                        // Final boundary marker
+    // --- Closing Boundary ---
+    appendString("--" + boundary + "--\r\n");
 
-    // --- HTTP Client Setup and Request ---
+    return payload;
+}
+
+/**
+ * @brief Performs the actual HTTP POST request with retries.
+ */
+/* static */ bool MultipartDataSender::performHttpPost(
+    const String& apiUrl, const String& boundary, const std::vector<uint8_t>& payload
+) {
     HTTPClient http;
-    bool success = false; // Track overall success
+    bool success = false;
 
-    // Begin HTTP connection
+    #ifdef ENABLE_DEBUG_SERIAL
+      Serial.println("Initiating HTTP POST request to " + apiUrl + "...");
+      Serial.printf("  Payload Size: %d bytes\n", payload.size());
+    #endif
+
     if (http.begin(apiUrl)) {
-
-        // Set necessary HTTP headers for multipart/form-data
+        // Set Headers
         http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
-        // Content-Length is crucial for the server to know the payload size
         http.addHeader("Content-Length", String(payload.size()));
+        // Add any other required headers (like Authorization if needed)
+        // http.addHeader("Authorization", "Bearer YOUR_TOKEN");
 
-        // Send the POST request with the constructed payload
         int httpResponseCode = -1;
-        int maxRetries = 3; // Number of retries for the POST request
+        const int maxRetries = 3;
         for (int retry = 0; retry < maxRetries; retry++) {
-            // Send the payload from the vector's data pointer and size
-            httpResponseCode = http.POST(payload.data(), payload.size());
+            #ifdef ENABLE_DEBUG_SERIAL
+              if (retry > 0) Serial.printf("  Retrying POST... (Attempt %d/%d)\n", retry + 1, maxRetries);
+            #endif
+            httpResponseCode = http.POST(const_cast<uint8_t*>(payload.data()), payload.size());
 
-            if (httpResponseCode > 0) { // Check if connection and request were successful at HTTP level
-                 // Read the response body (Task 5 fix)
-                String httpPayload = http.getString();
-                // Serial.printf("[HTTP] POST Response Code: %d\n", httpResponseCode); // Optional debug output
-                // Serial.println("[HTTP] POST Response Body: " + httpPayload); // Optional debug output
-
-                // Break the retry loop if we got a valid response code (even if it's an error like 4xx or 5xx)
-                // We primarily retry on connection errors (httpResponseCode < 0)
-                break;
+            if (httpResponseCode > 0) { // Got a response from server (even if error)
+                #ifdef ENABLE_DEBUG_SERIAL
+                  Serial.printf("  HTTP Response Code: %d\n", httpResponseCode);
+                #endif
+                // Read response body to clear buffer
+                String responseBody = http.getString();
+                #ifdef ENABLE_DEBUG_SERIAL
+                  // Only print body if short or if needed for debugging specific errors
+                  if (responseBody.length() < 200) {
+                     Serial.println("  HTTP Response Body: " + responseBody);
+                  } else {
+                     Serial.println("  HTTP Response Body: (Truncated - " + String(responseBody.length()) + " bytes)");
+                  }
+                #endif
+                break; // Exit retry loop once a response is received
             } else {
-                // Serial.printf("[HTTP] POST failed on attempt %d, error: %s\n", retry + 1, http.errorToString(httpResponseCode).c_str()); // Optional debug
-                delay(500); // Wait before retrying
+                #ifdef ENABLE_DEBUG_SERIAL
+                  Serial.printf("  HTTP POST failed (Attempt %d/%d), error: %s\n", retry + 1, maxRetries, http.errorToString(httpResponseCode).c_str());
+                #endif
+                delay(500); // Wait before retrying connection/send error
             }
-        }
+        } // End retry loop
 
-        // Check if the final response code indicates success (2xx range)
+        // Check if the final response code indicates success
         if (httpResponseCode >= 200 && httpResponseCode < 300) {
             success = true;
         }
 
-        // End the HTTP connection
-        http.end();
+        http.end(); // End connection
 
     } else {
-        // Serial.printf("[HTTP] Unable to connect to %s\n", apiUrl.c_str()); // Optional debug
+        #ifdef ENABLE_DEBUG_SERIAL
+          Serial.println("MultipartSender Error: Unable to begin HTTP connection to " + apiUrl);
+        #endif
         success = false;
     }
 
-    // The std::vector 'payload' goes out of scope here and its memory is automatically freed.
-
-    return success; // Return the final success status
+    return success;
 }
