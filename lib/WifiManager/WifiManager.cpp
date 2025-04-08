@@ -6,13 +6,12 @@ WiFiManager* WiFiManager::_instance = nullptr;
 
 // Constructor: Stores credentials, initializes state, sets up the singleton instance,
 // and registers static callback functions for WiFi events.
-WiFiManager::WiFiManager() { // Constructor sin argumentos
-
-    // Initialize internal state variables
-    _reconnectAttempts = 0;
-    _currentStatus = DISCONNECTED;
-    _ssid = ""; 
-    _password = ""; 
+WiFiManager::WiFiManager(): // Initialize internal state variables
+    _reconnectAttempts(0),
+    _currentStatus(DISCONNECTED),
+    _ssid(""),      
+    _password("")
+{ 
 
     // Singleton pattern: Store the instance pointer for static callbacks.
     // Assumes only one WiFiManager object will be created.

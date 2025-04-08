@@ -1,7 +1,7 @@
 #include "MLX90640Sensor.h"
 
 // Constructor implementation - Initializes the TwoWire reference.
-MLX90640Sensor::MLX90640Sensor(TwoWire &wire) : _wire(wire) {
+MLX90640Sensor::MLX90640Sensor(TwoWire &wire) : _wire(wire), frame{} {
     // The Adafruit_MLX90640 'mlx' object is implicitly constructed here.
     // The 'frame' buffer is allocated on the stack or globally depending on instantiation context.
 }
