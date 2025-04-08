@@ -583,6 +583,8 @@ bool captureImages(uint8_t** jpegImage, size_t& jpegLength, float** thermalData)
     #endif
     led.setState(ERROR_DATA); delay(3000); return false;
   }
+  // Copy thermal data. Destination buffer (*thermalData) was allocated immediately
+  // before with the exact size required (32 * 24 * sizeof(float)), so overflow is not possible.
   memcpy(*thermalData, rawThermalData, 32 * 24 * sizeof(float));
   #ifdef ENABLE_DEBUG_SERIAL
     Serial.println("Thermal data buffer allocated and copied.");

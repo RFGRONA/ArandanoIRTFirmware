@@ -94,7 +94,8 @@ uint8_t* OV2640Sensor::captureJPEG(size_t &length) {
     return nullptr;           // Return null pointer on failure
   }
 
-  // Copy the image data from the driver's framebuffer to the new buffer
+  // Copy JPEG data. Destination buffer (jpegData) was allocated immediately
+  // before with the exact size required (fb->len), so overflow is not possible.
   memcpy(jpegData, fb->buf, fb->len);
   length = fb->len; // Set the output length parameter
 
