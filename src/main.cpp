@@ -328,7 +328,6 @@ bool loadConfiguration(const char *filename) {
     // Allocate a JsonDocument (adjust size if config becomes larger)
     // Use https://arduinojson.org/v6/assistant/ to estimate size
     JsonDocument doc;
-    const size_t capacity = JSON_OBJECT_SIZE(5) + 250; // Rough estimate for 5 key-value pairs + string lengths
     // For ESP32, dynamic allocation usually works well.
     // If memory becomes an issue, consider StaticJsonDocument with calculated capacity.
 
