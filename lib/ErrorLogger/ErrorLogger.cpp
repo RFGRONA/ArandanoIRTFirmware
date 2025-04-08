@@ -17,7 +17,7 @@ bool ErrorLogger::sendLog(const String& apiUrl, const String& errorSource, const
     }
 
     // Crear documento JSON
-    StaticJsonDocument<JSON_LOG_SIZE> doc;
+    JsonDocument doc;
     doc["source"] = errorSource;
     doc["message"] = errorMessage;
 

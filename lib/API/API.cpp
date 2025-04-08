@@ -29,7 +29,7 @@ bool API::activateDevice() {
         http.addHeader("Content-Type", "application/json");
 
         // Construir payload JSON con el JWT de activación
-        StaticJsonDocument<256> doc;
+        JsonDocument doc;
         doc["activation_code"] = ACTIVATION_JWT;
         String payload;
         serializeJson(doc, payload);
@@ -83,7 +83,7 @@ bool API::checkActivation() {
             http.end();
             
             // Se espera que la respuesta contenga un JSON con el token
-            StaticJsonDocument<256> responseDoc;
+            JsonDocument responseDoc;
             DeserializationError error = deserializeJson(responseDoc, response);
             if (!error) {
                 const char* newToken = responseDoc["token"];
