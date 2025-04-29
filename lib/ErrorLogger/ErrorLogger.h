@@ -1,20 +1,40 @@
+/**
+ * @file ErrorLogger.h
+ * @brief Defines a utility class for sending error log messages to a remote server.
+ */
 #ifndef ERRORLOGGER_H
 #define ERRORLOGGER_H
 
-#include <Arduino.h> // Para String
+#include <Arduino.h> // Required for String class
 
+/**
+ * @class ErrorLogger
+ * @brief Provides a static method to format and send error details as JSON via HTTP POST.
+ *
+ * This utility class simplifies sending structured error messages to a backend endpoint.
+ * It includes checks for network connectivity and backend status before attempting to send.
+ */
 class ErrorLogger {
 public:
     /**
-     * @brief Envía un mensaje de log de error al endpoint especificado.
-     * 
-     * Construye un JSON con la fuente del error, el mensaje y un timestamp (millis)
-     * y lo envía vía HTTP POST.
-     * 
-     * @param apiUrl La URL completa del endpoint de logging en el backend.
-     * @param errorSource Una cadena corta identificando dónde ocurrió el error (e.g., "SENSOR_INIT", "DHT_READ", "CAPTURE_FAIL").
-     * @param errorMessage El mensaje detallado del error.
-     * @return true si el log se envió y el servidor respondió con un código 2xx, false en caso contrario (incluyendo si no hay conexión WiFi).
+     * @brief Sends an error log message to the specified API endpoint.
+     *
+     * Constructs a JSON payload with the error source and message:
+     * `{"source": errorSource, "message": errorMessage}`
+     * and sends it via HTTP POST to the given URL.
+     *
+     * @param apiUrl The full URL (String) of the backend logging endpoint.
+     * @param errorSource A short string identifying the origin of the error (e.g., "SENSOR_INIT", "DHT_READ", "API_FAIL").
+     * @param errorMessage A detailed description of the error message (String).
+     * @return `true` if the log message was successfully sent AND the server responded with an
+     * HTTP 2xx status code. Returns `false` if WiFi is disconnected, if the backend status
+     * check (via the global `api` object) fails, if the HTTP request fails, or if the server
+     * responds with a non-2xx status code.
+     * @note This function depends on a globally available `api` object of class `API` to check
+     * backend status via `api.checkBackendStatus()`. Ensure this object is instantiated globally.
+     * @note This function currently uses an HTTP connection (`WiFiClient`). If the `apiUrl`
+     * requires HTTPS, the implementation in the .cpp file must be modified to use `WiFiClientSecure`
+     * and handle certificate validation appropriately.
      */
     static bool sendLog(const String& apiUrl, const String& errorSource, const String& errorMessage);
 };

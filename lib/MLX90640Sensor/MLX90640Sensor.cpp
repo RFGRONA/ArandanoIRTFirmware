@@ -1,72 +1,100 @@
+/**
+ * @file MLX90640Sensor.cpp
+ * @brief Implements the MLX90640Sensor wrapper class methods.
+ */
 #include "MLX90640Sensor.h"
+#include <math.h> // Potentially needed for isnan, although MLX library might not return NaN.
 
-// Constructor implementation - Initializes the TwoWire reference.
+// Constructor implementation - Initializes the TwoWire reference and zero-initializes the frame buffer.
 MLX90640Sensor::MLX90640Sensor(TwoWire &wire) : _wire(wire), frame{} {
-    // The Adafruit_MLX90640 'mlx' object is implicitly constructed here.
-    // The 'frame' buffer is allocated on the stack or globally depending on instantiation context.
+    // The Adafruit_MLX90640 'mlx' object is implicitly default-constructed here.
+    // The 'frame' buffer is allocated (e.g., on stack if object is local, or in static memory if global).
+    // Using frame{} ensures the buffer starts zeroed, which can be helpful for debugging.
 }
 
-// Initializes the sensor using the Adafruit library.
+// Initializes the sensor communication and sets operating parameters using the Adafruit library.
 bool MLX90640Sensor::begin() {
-    // Attempt to initialize the Adafruit_MLX90640 library object
-    // using the default I2C address and the provided TwoWire instance.
+    // Attempt to initialize the Adafruit_MLX90640 library object using the default
+    // I2C address (0x33) and the provided TwoWire instance (e.g., Wire or Wire1).
     if (!mlx.begin(MLX90640_I2CADDR_DEFAULT, &_wire)) {
-        // Serial.println("Failed to init MLX90640"); // Optional debug
-        return false; // Return false if library initialization fails
+        // Optional: Log failure to the Serial monitor for debugging.
+        // Serial.println("Failed to initialize MLX90640 sensor. Check wiring and I2C address.");
+        return false; // Return false if library initialization fails.
     }
-    // Serial.println("MLX90640 Initialized"); // Optional debug
+    // Optional: Log success for debugging.
+    // Serial.println("MLX90640 Initialized Successfully");
 
-    // Set sensor parameters after successful initialization
-    mlx.setMode(MLX90640_CHESS);          // Set readout pattern (Chess or Interleaved)
-    mlx.setResolution(MLX90640_ADC_18BIT); // Set ADC resolution
-    mlx.setRefreshRate(MLX90640_0_5_HZ);  // Set refresh rate (lower rate means less noise)
+    // Configure sensor parameters after successful initialization.
+    mlx.setMode(MLX90640_CHESS);       // Set readout pattern (Chess recommended for faster readout).
+    mlx.setResolution(MLX90640_ADC_18BIT); // Set ADC resolution (higher means less noise, slower).
+    mlx.setRefreshRate(MLX90640_0_5_HZ); // Set refresh rate (lower rate means less noise).
 
-    // NOTE: A delay should be added *after* calling this begin() function
-    // in the main sketch (~1.1s for 0.5Hz) before the first readFrame() call.
+    // IMPORTANT NOTE (documented in .h): A delay must be added *after* calling this begin()
+    // function in the main sketch (e.g., in setup()) before the first readFrame() call
+    // to allow the sensor time for its first measurement cycle (e.g., >1s for 0.5Hz).
 
-    return true; // Return true if initialization and configuration were successful
+    return true; // Return true indicating successful initialization and configuration.
 }
 
-// Reads a complete frame of thermal data into the internal 'frame' buffer.
+// Reads a complete frame of thermal data (768 pixels) into the internal 'frame' buffer.
 bool MLX90640Sensor::readFrame() {
-    // Call the library function to get a frame.
-    // The library handles reading subpages and calculating temperatures.
-    // It returns 0 on success, non-zero on error.
+    // Call the Adafruit library function to get a complete frame.
+    // The library handles reading subpages and calculating temperatures internally.
+    // It returns 0 on success, or a non-zero error code on failure.
     if (mlx.getFrame(frame) != 0) {
-        // Serial.println("Failed to read frame from MLX90640"); // Optional debug
-        return false; // Frame read failed
+        // Optional: Log frame read failure for debugging.
+        // Serial.println("Failed to read frame from MLX90640");
+        return false; // Frame read failed.
     }
-    return true; // Frame read successfully
+    // Optional: Add short delay if needed between reads, although library might handle timing.
+    // delay(50);
+    return true; // Frame read successfully into the 'frame' buffer.
 }
 
-// Returns a pointer to the internal buffer holding the last read frame data.
+// Returns a direct pointer to the internal buffer holding the last read frame data.
 float* MLX90640Sensor::getThermalData() {
     // The caller receives a pointer to the internal 'frame' array.
-    // The data is valid only after a successful call to readFrame().
+    // The validity of the data depends on the success of the last 'readFrame()' call.
     return frame;
 }
 
 // Calculates the average temperature of all pixels in the current 'frame' buffer.
 float MLX90640Sensor::getAverageTemperature() {
-    float sum = 0;
-    const int totalPixels = 32 * 24; // 768 pixels total
-    // Sum up all pixel values
+    float sum = 0.0f;
+    const int totalPixels = 32 * 24; // 768 pixels total.
+
+    // Sum up all pixel temperature values from the buffer.
     for (int i = 0; i < totalPixels; i++) {
-        sum += frame[i];
+        // Basic validity check - skip NaN or potentially invalid very low values if needed
+        // if (!isnan(frame[i]) && frame[i] > -40.0f) { // Example check
+           sum += frame[i];
+        // } else { /* handle error or skip pixel */ }
     }
-    // Return the average
-    return sum / totalPixels;
+
+    // Return the average temperature. Handle division by zero if totalPixels were 0 (shouldn't happen here).
+    if (totalPixels > 0) {
+        return sum / totalPixels;
+    } else {
+        return 0.0f; // Or NAN or other error indicator
+    }
 }
 
 // Finds the maximum temperature among all pixels in the current 'frame' buffer.
 float MLX90640Sensor::getMaxTemperature() {
     const int totalPixels = 32 * 24;
-    float maxTemp = frame[0]; // Assume first pixel is max initially
-    // Iterate through the rest of the pixels
-    for (int i = 1; i < totalPixels; i++) {
-        if (frame[i] > maxTemp) {
-            maxTemp = frame[i]; // Update max if current pixel is hotter
-        }
+    if (totalPixels == 0) return -INFINITY; // Or NAN
+
+    float maxTemp = -INFINITY; // Start with a very low value or frame[0] after checking validity.
+    // If using frame[0], ensure it's valid first. Safer to start with -INFINITY.
+
+    // Iterate through all pixels to find the maximum valid temperature.
+    for (int i = 0; i < totalPixels; i++) {
+         // Basic validity check - skip NaN or potentially invalid values if needed
+        // if (!isnan(frame[i])) {
+            if (frame[i] > maxTemp) {
+                maxTemp = frame[i]; // Update max if current pixel is hotter.
+            }
+        // }
     }
     return maxTemp;
 }
@@ -74,12 +102,19 @@ float MLX90640Sensor::getMaxTemperature() {
 // Finds the minimum temperature among all pixels in the current 'frame' buffer.
 float MLX90640Sensor::getMinTemperature() {
     const int totalPixels = 32 * 24;
-    float minTemp = frame[0]; // Assume first pixel is min initially
-    // Iterate through the rest of the pixels
-    for (int i = 1; i < totalPixels; i++) {
-        if (frame[i] < minTemp) {
-            minTemp = frame[i]; // Update min if current pixel is colder
-        }
+     if (totalPixels == 0) return INFINITY; // Or NAN
+
+    float minTemp = INFINITY; // Start with a very high value or frame[0] after checking validity.
+     // If using frame[0], ensure it's valid first. Safer to start with INFINITY.
+
+    // Iterate through all pixels to find the minimum valid temperature.
+    for (int i = 0; i < totalPixels; i++) {
+         // Basic validity check - skip NaN or potentially invalid values if needed
+         // if (!isnan(frame[i])) {
+            if (frame[i] < minTemp) {
+                minTemp = frame[i]; // Update min if current pixel is colder.
+            }
+        // }
     }
     return minTemp;
 }

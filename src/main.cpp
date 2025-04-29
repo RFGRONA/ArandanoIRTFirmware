@@ -1,31 +1,32 @@
 /**
  * @file main.cpp
- * @brief Main application firmware for ESP32-S3 based environmental and plant monitoring device.
+ * @brief Main application firmware for an ESP32-S3 based environmental and plant monitoring device.
  *
  * This firmware initializes various sensors (DHT22, BH1750, MLX90640, OV2640),
- * loads configuration from LittleFS, connects to WiFi using loaded credentials,
- * periodically reads sensor data, captures thermal and visual images,
- * sends the data to configured API endpoints, and enters deep sleep between cycles.
- * Includes status indication via a WS2812 LED and optional serial debugging.
+ * loads configuration settings from LittleFS, connects to a WiFi network using
+ * the loaded credentials, periodically reads sensor data, captures thermal and
+ * visual images, sends the collected data to configured API endpoints, and
+ * enters deep sleep mode between operational cycles to conserve power.
+ * It includes system status indication via a WS2812 LED and optional serial debugging output.
  */
 
 // --- Core Arduino and System Includes ---
 #include <Arduino.h>
-#include <Wire.h>            // Required for I2C communication
-#include "esp_heap_caps.h" // Required for memory checking/allocation (e.g., ps_malloc)
-#include "esp_sleep.h"       // Required for deep sleep functions
+#include <Wire.h>           // Required for I2C communication (BH1750, MLX90640)
+#include "esp_heap_caps.h" // Required for memory checking/allocation functions (e.g., ps_malloc for PSRAM)
+#include "esp_sleep.h"     // Required for ESP32 deep sleep functions
 
 // --- Filesystem & JSON Includes ---
-#include <FS.h>              // Filesystem base class
-#include <LittleFS.h>        // LittleFS filesystem implementation
-#include <ArduinoJson.h>     // JSON parsing/serialization
+#include <FS.h>             // Filesystem base class
+#include <LittleFS.h>       // LittleFS filesystem implementation for ESP32
+#include <ArduinoJson.h>    // JSON parsing/serialization library
 
 // --- Optional Debugging ---
-// Uncomment the following line to enable Serial output for debugging
+// Uncomment the following line to enable Serial output for detailed debugging information.
 // #define ENABLE_DEBUG_SERIAL
 // --------------------------
 
-// --- Local Libraries ---
+// --- Local Libraries (Project Specific Classes) ---
 #include "DHT22Sensor.h"
 #include "BH1750Sensor.h"
 #include "MLX90640Sensor.h"
@@ -34,935 +35,1322 @@
 #include "EnvironmentDataJSON.h"
 #include "MultipartDataSender.h"
 #include "WiFiManager.h"
-// #include "ErrorLogger.h" // Commented out (backend not ready)
-// #include "API.h"          // Commented out (backend not ready)
+// #include "ErrorLogger.h" // Commented out (functionality possibly deferred or backend not ready)
+// #include "API.h"           // Commented out (functionality possibly deferred or backend not ready)
 
-// --- Pin Definitions ---
-#define I2C_SDA 47   ///< GPIO pin for I2C SDA line
-#define I2C_SCL 21   ///< GPIO pin for I2C SCL line
-#define DHT_PIN 14   ///< GPIO pin for DHT22 data line
+// --- Hardware Pin Definitions ---
+#define I2C_SDA 47   ///< GPIO pin assigned for the I2C SDA (Data) line.
+#define I2C_SCL 21   ///< GPIO pin assigned for the I2C SCL (Clock) line.
+#define DHT_PIN 14   ///< GPIO pin connected to the DHT22 temperature/humidity sensor data line.
 
 // --- General Configuration (Defaults & Constants) ---
-#define SENSOR_READ_RETRIES 3     ///< Number of attempts to read sensor data if initial read fails.
-#define WIFI_CONNECT_TIMEOUT_MS 20000 ///< Timeout (in milliseconds) for establishing WiFi connection.
-#define CONFIG_FILENAME "/config.json" ///< Filename for configuration on LittleFS
+#define SENSOR_READ_RETRIES 3       ///< Default number of attempts to read sensor data if an initial read fails.
+#define WIFI_CONNECT_TIMEOUT_MS 20000 ///< Default timeout (in milliseconds) for establishing the initial WiFi connection in the loop.
+#define CONFIG_FILENAME "/config.json" ///< Filename used for storing configuration settings on the LittleFS filesystem.
 
 // --- Configuration Structure ---
 /**
- * @brief Holds application configuration loaded from LittleFS or defaults.
+ * @brief Holds application configuration parameters loaded from LittleFS or default values.
  */
 struct Config {
-    String wifi_ssid = "DEFAULT_SSID"; ///< Default WiFi SSID if config load fails.
-    String wifi_pass = "";             ///< Default WiFi Password.
-    String api_env = "";               ///< Default Environmental API URL.
-    String api_img = "";               ///< Default Image API URL.
-    int sleep_sec = 60;                ///< Default sleep duration in seconds.
+    String wifi_ssid = "DEFAULT_SSID"; ///< Default WiFi SSID used if loading from config file fails.
+    String wifi_pass = "";             ///< Default WiFi Password used if loading fails (or network is open).
+    String api_env = "";               ///< Default API endpoint URL for sending environmental data.
+    String api_img = "";               ///< Default API endpoint URL for sending image/thermal data (multipart).
+    int sleep_sec = 60;                ///< Default deep sleep duration in seconds between cycles.
 };
-Config config; // Global configuration object
+Config config; // Global instance holding the application's current configuration.
 // -----------------------------
 
 // --- I2C Bus Instance ---
-// Using the default Wire object. Pins are set in Wire.begin().
+// Using the default Wire object provided by the Arduino framework for I2C communication.
+// Pins are configured in Wire.begin() using I2C_SDA and I2C_SCL defines.
 
 // --- Global Object Instances ---
-BH1750Sensor lightSensor(Wire, I2C_SDA, I2C_SCL); ///< Light sensor object using default Wire.
-MLX90640Sensor thermalSensor(Wire);               ///< Thermal camera object using default Wire.
-DHT22Sensor dhtSensor(DHT_PIN);                   ///< Temperature/Humidity sensor object.
-OV2640Sensor camera;                              ///< Visual camera object.
-LEDStatus led;                                    ///< Status LED object.
-WiFiManager wifiManager;                          ///< WiFi connection manager object (constructor now takes no args).
-// ErrorLogger errorLogger;                       ///< Error logger object (commented out for now).
+// Instantiating objects for each peripheral/utility class.
+BH1750Sensor lightSensor(Wire, I2C_SDA, I2C_SCL); ///< Light sensor object using the default Wire I2C bus.
+MLX90640Sensor thermalSensor(Wire);               ///< Thermal camera object using the default Wire I2C bus.
+DHT22Sensor dhtSensor(DHT_PIN);                   ///< Temperature/Humidity sensor object connected to DHT_PIN.
+OV2640Sensor camera;                              ///< Visual camera object (uses ESP-IDF driver).
+LEDStatus led;                                    ///< Status LED management object.
+WiFiManager wifiManager;                          ///< WiFi connection management object.
+// ErrorLogger errorLogger;                         ///< Error logger object (functionality currently commented out).
 
 // --- Function Prototypes ---
+
+// Configuration and Initialization
+/** @brief Loads configuration from LittleFS into the global 'config' struct. */
 bool loadConfiguration(const char *filename);
-void ledBlink();
+/** @brief Initializes all hardware sensors sequentially. */
 bool initializeSensors();
+
+// Main Task Orchestration
+/** @brief Reads environmental sensor data (light, temp, humidity) with retries. */
 bool readEnvironmentData();
+/** @brief Captures thermal and visual image data into allocated buffers. */
 bool captureImages(uint8_t** jpegImage, size_t& jpegLength, float** thermalData);
+/** @brief Sends captured image data (thermal and visual) to the image API endpoint. */
 bool sendImageData(uint8_t* jpegImage, size_t jpegLength, float* thermalData);
+
+// System Control
+/** @brief Enters ESP32 deep sleep for a specified duration. */
 void deepSleep(unsigned long seconds);
+/** @brief Frees allocated memory buffers and deinitializes the camera. */
 void cleanupResources(uint8_t* jpegImage, float* thermalData);
+/** @brief Ensures WiFi is connected, blocking with a timeout if necessary. See WiFiManager for non-blocking handling. */
 bool ensureWiFiConnected(unsigned long timeout);
+/** @brief Performs a simple visual blink sequence using the status LED. */
+void ledBlink();
 
-// --- Helper Function Prototypes for Setup ---
+// Setup Helper Prototypes
+/** @brief Initializes the Serial port for debugging if ENABLE_DEBUG_SERIAL is defined. */
 void initSerial();
+/** @brief Initializes the status LED via the LEDStatus object. */
 void initLED();
+/** @brief Initializes and mounts the LittleFS filesystem, formatting if necessary. */
 bool initFilesystem();
+/** @brief Loads configuration and applies WiFi credentials to the WiFiManager. */
 void loadConfigAndSetCredentials();
+/** @brief Handles actions to take if sensor initialization fails (LED, sleep). */
 void handleSensorInitFailure();
-// --- Helper Function Prototypes for Sensor Init ---
-bool initDHTSensor();
-bool initI2C();
-bool initLightSensor();
-bool initThermalSensor();
-bool initCameraSensor();
 
-// --- Helper Function Prototypes for Loop ---
+// Sensor Initialization Helper Prototypes
+/** @brief Initializes the DHT22 sensor. */
+bool initDHTSensor(); // Note: Current implementation in initializeSensors() just calls dhtSensor.begin() directly.
+/** @brief Initializes the I2C bus (Wire) with defined pins and clock speed. */
+bool initI2C(); // Note: Current implementation is directly inside initializeSensors().
+/** @brief Initializes the BH1750 light sensor. */
+bool initLightSensor(); // Note: Current implementation is directly inside initializeSensors().
+/** @brief Initializes the MLX90640 thermal sensor. */
+bool initThermalSensor(); // Note: Current implementation is directly inside initializeSensors().
+/** @brief Initializes the OV2640 camera sensor. */
+bool initCameraSensor(); // Note: Current implementation is directly inside initializeSensors().
+
+// Loop Helper Prototypes
+/** @brief Handles the initial WiFi connection check in the main loop, sleeping on failure. */
 bool handleWiFiConnection();
+/** @brief Orchestrates reading and sending environmental data tasks. */
 bool performEnvironmentTasks();
+/** @brief Orchestrates capturing and sending image data tasks. */
 bool performImageTasks(uint8_t** jpegImage, size_t& jpegLength, float** thermalData);
+/** @brief Performs final actions before entering deep sleep (LED status, FS unmount). */
 void prepareForSleep(bool cycleStatusOK);
 
-// --- Helper Function Prototypes for Environment Task ---
+// Environment Task Helper Prototypes
+/** @brief Reads the light sensor value with retries. */
 bool readLightSensorWithRetry(float &lightLevel);
+/** @brief Reads temperature and humidity from the DHT sensor with retries. */
 bool readDHTSensorWithRetry(float &temperature, float &humidity);
+/** @brief Sends the collected environmental data to the configured server endpoint. */
 bool sendEnvironmentDataToServer(float lightLevel, float temperature, float humidity);
 
-// --- Helper Function Prototypes for Image Capture ---
+// Image Capture Helper Prototypes
+/** @brief Captures a thermal data frame and copies it into a newly allocated buffer. */
 bool captureAndCopyThermalData(float** thermalDataBuffer);
+/** @brief Captures a visual JPEG image into a buffer allocated by the camera driver. */
 bool captureVisualJPEG(uint8_t** jpegImageBuffer, size_t& jpegLength);
 
+
 // =========================================================================
-// ===                          SETUP FUNCTION                           ===
+// ===                           SETUP FUNCTION                          ===
 // =========================================================================
 /**
  * @brief Setup function, runs once on power-on or reset (including wake from deep sleep).
- * Initializes Serial (if debugging enabled), LED, LittleFS, loads configuration,
- * sets WiFi credentials, initializes sensors.
- * Enters deep sleep immediately if LittleFS mount or sensor initialization fails.
+ * Initializes essential peripherals and systems in order: LED, Serial (optional),
+ * LittleFS, loads configuration, sets WiFi credentials based on config, and initializes
+ * all connected sensors.
+ * If critical initialization steps (LittleFS, Sensors) fail, it halts or enters deep sleep
+ * immediately to prevent undefined behavior in the main loop.
  */
 void setup() {
-  // Initialize LED first for early visual feedback
-  initLED();
+    // Initialize LED first for early visual feedback during boot/setup.
+    initLED();
 
-  // Initialize Serial port for debugging if enabled
-  initSerial();
+    // Initialize Serial port for debugging output if enabled via #define.
+    initSerial();
 
-  // Initialize LittleFS filesystem, halt on critical failure
-  if (!initFilesystem()) {
-      // Specific error LED state might be set inside initFilesystem
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("CRITICAL: Halting due to filesystem error.");
-      #endif
-      while(1) { delay(1000); } // Halt execution
-  }
+    // Initialize LittleFS filesystem. This is critical for loading configuration.
+    // Halts execution indefinitely on catastrophic failure (cannot mount or format).
+    if (!initFilesystem()) {
+        // Specific error LED state might be set inside initFilesystem helper.
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("CRITICAL: Halting execution due to filesystem initialization error.");
+        #endif
+        // Halt indefinitely to indicate critical failure. Requires manual reset/power cycle.
+        while(1) { delay(1000); }
+    }
 
-  // Load configuration from file and set WiFi credentials
-  loadConfigAndSetCredentials();
+    // Load configuration from the JSON file and set WiFi credentials in the WiFiManager.
+    // Uses default values if loading fails, allowing operation with defaults.
+    loadConfigAndSetCredentials();
 
-  // Initialize all sensors using the refactored function
-  if (!initializeSensors()) {
-       handleSensorInitFailure(); // Handles error LED and deep sleep logic
-       // Execution stops in handleSensorInitFailure if it enters deep sleep
-  }
+    // Initialize all connected hardware sensors using the refactored helper function.
+    if (!initializeSensors()) {
+        // If any sensor fails initialization, handle the failure gracefully.
+        // This typically involves setting an error LED and entering deep sleep.
+        handleSensorInitFailure();
+        // Note: Execution stops within handleSensorInitFailure if it enters deep sleep.
+    }
 
-  // Setup completed successfully
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Setup complete. Initial LED state OK.");
-    Serial.println("--------------------------------------");
-  #endif
-  led.setState(ALL_OK); // Ensure final OK state for setup
-  delay(1000);          // Brief delay showing OK status
+    // Setup completed successfully if execution reaches here.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("--------------------------------------");
+        Serial.println("Device setup completed successfully.");
+        Serial.println("Initial LED state indicates OK.");
+        Serial.println("--------------------------------------");
+    #endif
+    led.setState(ALL_OK); // Ensure final LED state reflects successful setup.
+    delay(1000);          // Brief delay showing the OK status before entering the loop.
 }
 
+
 // =========================================================================
-// ===                           MAIN LOOP                               ===
+// ===                            MAIN LOOP                              ===
 // =========================================================================
 /**
- * @brief Main loop function, runs repeatedly after setup.
- * Orchestrates the main workflow: WiFi, environment tasks, image tasks, cleanup, sleep.
+ * @brief Main application loop function, runs repeatedly after setup completes.
+ * Orchestrates the primary operational workflow cycle:
+ * 1. Ensures WiFi connection is active (connects/retries if needed, sleeps on failure).
+ * 2. Reads environmental sensor data and sends it to the server.
+ * 3. Captures thermal and visual image data and sends it to the server.
+ * 4. Cleans up resources allocated during the cycle (memory buffers, camera peripheral).
+ * 5. Prepares for and enters deep sleep for the configured duration.
  */
 void loop() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("\n--- Starting Loop Cycle ---");
-  #endif
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("\n======================================");
+        Serial.println("--- Starting New Operational Cycle ---");
+        Serial.println("======================================");
+    #endif
 
-  // Indicate Start of Cycle
-  ledBlink();
+    // Perform a visual blink sequence to indicate the start of a new cycle.
+    ledBlink();
 
-  // Track overall success of the cycle
-  bool everythingOK = true;
+    // Track the overall success status of the current operational cycle.
+    // Set to false if any critical step fails.
+    bool everythingOK = true;
 
-  // 1. Handle WiFi Connection (includes sleep on failure)
-  if (!handleWiFiConnection()) {
-      return; // Exit loop early if WiFi failed (already going to sleep)
-  }
+    // --- 1. Handle WiFi Connection ---
+    // Ensures WiFi is connected before proceeding. Sleeps on failure.
+    if (!handleWiFiConnection()) {
+        // If WiFi connection failed, handleWiFiConnection() already initiated sleep.
+        // Return here prevents further execution in this failed cycle.
+        return;
+    }
 
-  // 2. Perform Environmental Data Task
-  if (!performEnvironmentTasks()) {
-      everythingOK = false; // Mark cycle as having errors
-  }
+    // --- 2. Perform Environmental Data Tasks ---
+    // Read environmental sensors and send data to the server.
+    if (!performEnvironmentTasks()) {
+        // If reading or sending env data failed, mark the cycle as having errors.
+        // Specific error LED state should be set within performEnvironmentTasks.
+        everythingOK = false;
+    }
 
-  // 3. Perform Image Task (Capture, Send/Save)
-  // Declare pointers here so they are in scope for cleanupResources
-  uint8_t* jpegImage = nullptr;
-  size_t jpegLength = 0;
-  float* thermalData = nullptr;
-  // Only attempt image tasks if previous steps were generally OK
-  if (everythingOK) {
-      if (!performImageTasks(&jpegImage, jpegLength, &thermalData)) {
-          everythingOK = false; // Mark cycle as having errors
-      }
-  }
+    // --- 3. Perform Image Data Tasks ---
+    // Pointers for allocated buffers needed for capture and cleanup.
+    uint8_t* jpegImage = nullptr;
+    size_t jpegLength = 0;
+    float* thermalData = nullptr;
 
-  // 4. Cleanup Resources (Memory buffers and Camera peripheral)
-  // Pass the pointers, even if null, to the cleanup function.
-  cleanupResources(jpegImage, thermalData);
+    // Only attempt image tasks if previous critical steps (like WiFi) were successful.
+    // Can decide whether to proceed if only env tasks failed based on requirements.
+    // Current logic proceeds even if env tasks failed, but marks everythingOK as false.
+    // Consider adding 'if (everythingOK)' here if image tasks depend on env tasks success.
+    if (!performImageTasks(&jpegImage, jpegLength, &thermalData)) {
+        // If capturing or sending image data failed, mark the cycle as having errors.
+        // Specific error LED state should be set within performImageTasks.
+        everythingOK = false;
+    }
+    // Note: jpegImage and thermalData pointers are updated by performImageTasks.
 
-  // 5. Prepare for Sleep (Final LED status, blink, unmount FS)
-  prepareForSleep(everythingOK);
+    // --- 4. Cleanup Allocated Resources ---
+    // Frees memory allocated for image/thermal buffers and deinitializes the camera.
+    // This is crucial to prevent memory leaks and prepare for sleep.
+    // Pass the potentially updated pointers (even if null) to the cleanup function.
+    cleanupResources(jpegImage, thermalData);
 
-  // 6. Enter Deep Sleep
-  deepSleep(config.sleep_sec);
+    // --- 5. Prepare for Deep Sleep ---
+    // Set final LED status based on cycle success, blink, unmount filesystem.
+    prepareForSleep(everythingOK);
+
+    // --- 6. Enter Deep Sleep ---
+    // Put the ESP32 into deep sleep mode for the duration specified in the config.
+    deepSleep(config.sleep_sec);
+    // --- Execution stops here until the device wakes up ---
 }
 
 
 // =========================================================================
-// ===                      HELPER FUNCTIONS                           ===
+// ===                        HELPER FUNCTIONS                           ===
 // =========================================================================
 
 /**
- * @brief Loads configuration from a JSON file on LittleFS.
- * Populates the global 'config' struct. Uses defaults if file not found or parsing fails.
- * @param filename The path to the configuration file (e.g., "/config.json").
- * @return True if the configuration was loaded successfully from the file, False otherwise.
+ * @brief Loads configuration from a JSON file on LittleFS into the global 'config' struct.
+ * Reads the specified file, parses its JSON content, and updates the members
+ * of the global `config` object. If the file doesn't exist, cannot be opened,
+ * or contains invalid JSON, default values already present in the `config` struct
+ * will be used.
+ * @param filename The full path to the configuration file on the LittleFS filesystem (e.g., "/config.json").
+ * @return `true` if the configuration file was successfully opened, parsed, and values were extracted.
+ * `false` otherwise (file not found, parse error). Defaults are used in case of `false`.
  */
 bool loadConfiguration(const char *filename) {
+    // Attempt to open the configuration file for reading.
     File configFile = LittleFS.open(filename, "r");
     if (!configFile) {
         #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Failed to open config file: " + String(filename));
+            Serial.println("Warning: Failed to open config file: " + String(filename) + ". Using defaults.");
         #endif
-        return false; // Indicate failure to open file
+        return false; // Indicate failure to open file (defaults will be used).
     }
 
-    // Allocate a JsonDocument (adjust size if config becomes larger)
-    // Use https://arduinojson.org/v6/assistant/ to estimate size
-    JsonDocument doc;
-    // For ESP32, dynamic allocation usually works well.
-    // If memory becomes an issue, consider StaticJsonDocument with calculated capacity.
+    // Allocate a JsonDocument. Using dynamic allocation on ESP32 is generally fine.
+    // Adjust size calculation/consider StaticJsonDocument if memory constraints are critical.
+    // See ArduinoJson documentation for capacity calculation.
+    JsonDocument doc; // Using dynamic allocation by default
 
-    // Parse the JSON file content
+    // Parse the JSON content directly from the file stream.
     DeserializationError error = deserializeJson(doc, configFile);
-    configFile.close(); // Close the file promptly
+    configFile.close(); // Close the file as soon as possible.
 
+    // Check for JSON parsing errors.
     if (error) {
         #ifdef ENABLE_DEBUG_SERIAL
-        Serial.print("Failed to parse config file: ");
-        Serial.println(error.c_str());
+            Serial.print("Warning: Failed to parse config file JSON: ");
+            Serial.println(error.c_str());
+            Serial.println("Using default configuration values.");
         #endif
-        return false; // Indicate parsing failure
+        return false; // Indicate parsing failure (defaults will be used).
     }
 
-    // Extract values, using defaults if keys are missing or null
-    // Operator | provides default value if doc["key"] is null or missing
-    config.wifi_ssid = doc["wifi_ssid"] | String("DEFAULT_SSID");
-    config.wifi_pass = doc["wifi_pass"] | String("");
-    config.api_env = doc["api_env"] | String("");
-    config.api_img = doc["api_img"] | String("");
-    config.sleep_sec = doc["sleep_sec"] | 60;
+    // Extract configuration values from the parsed JSON document.
+    // The `|` operator provides a default value if the key is missing or the value is null.
+    config.wifi_ssid = doc["wifi_ssid"] | config.wifi_ssid; // Keep default if missing
+    config.wifi_pass = doc["wifi_pass"] | config.wifi_pass; // Keep default if missing
+    config.api_env = doc["api_env"] | config.api_env;     // Keep default if missing
+    config.api_img = doc["api_img"] | config.api_img;     // Keep default if missing
+    config.sleep_sec = doc["sleep_sec"] | config.sleep_sec; // Keep default if missing
 
     #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Configuration loaded successfully:");
-    Serial.println("  WiFi SSID: " + config.wifi_ssid);
-    Serial.println("  WiFi Pass: ********"); // Avoid printing password
-    Serial.println("  API Env: " + config.api_env);
-    Serial.println("  API Img: " + config.api_img);
-    Serial.println("  Sleep Sec: " + String(config.sleep_sec));
+        Serial.println("Configuration loaded successfully from file:");
+        Serial.println("  WiFi SSID: " + config.wifi_ssid);
+        Serial.println("  WiFi Pass: [REDACTED]"); // Avoid printing the password to Serial.
+        Serial.println("  API Env URL: " + config.api_env);
+        Serial.println("  API Img URL: " + config.api_img);
+        Serial.println("  Sleep Seconds: " + String(config.sleep_sec));
     #endif
-    return true; // Indicate successful loading
+    return true; // Indicate successful loading from file.
 }
 
-
 /**
- * @brief Ensures WiFi is connected, attempting to connect if necessary.
- * (Documentation moved to header/previous example - implementation unchanged)
+ * @brief Ensures WiFi is connected, blocking with a timeout if necessary.
+ * Checks the current connection status via WiFiManager. If not connected,
+ * it initiates a connection attempt and waits up to the specified timeout
+ * for the connection to establish (status becomes CONNECTED). Uses the
+ * WiFiManager's non-blocking handler internally during the wait loop.
+ * Sets LED status appropriately.
+ * @param timeout The maximum time in milliseconds to wait for a connection.
+ * @return `true` if the device is connected to WiFi (either initially or after connecting within the timeout).
+ * `false` if the connection attempt fails or times out.
  */
 bool ensureWiFiConnected(unsigned long timeout) {
-  if (wifiManager.getConnectionStatus() == WiFiManager::CONNECTED) {
-      return true;
-  }
-  if (wifiManager.getConnectionStatus() != WiFiManager::CONNECTING) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("WiFi not connected. Attempting connection...");
-      #endif
-      wifiManager.connectToWiFi();
-  }
-  led.setState(CONNECTING_WIFI);
-  unsigned long startTime = millis();
-  while (millis() - startTime < timeout) {
-    wifiManager.handleWiFi();
+    // Check if already connected - the common case after the first cycle.
     if (wifiManager.getConnectionStatus() == WiFiManager::CONNECTED) {
-        return true;
+        return true; // Already connected, nothing more to do.
     }
-    if (wifiManager.getConnectionStatus() == WiFiManager::CONNECTION_FAILED) {
+
+    // If not connected and not already trying to connect, start the process.
+    if (wifiManager.getConnectionStatus() != WiFiManager::CONNECTING) {
         #ifdef ENABLE_DEBUG_SERIAL
-          Serial.println("WiFi connection definitely failed (max retries).");
+            Serial.println("WiFi is not connected. Initiating connection attempt...");
         #endif
-        break;
+        wifiManager.connectToWiFi(); // Start the non-blocking connection attempt.
+    } else {
+         #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("WiFi connection already in progress...");
+         #endif
     }
-    delay(100);
-  }
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("WiFi connection timed out or failed within ensureWiFiConnected.");
-  #endif
-  led.setState(ERROR_WIFI);
-  return false;
+
+    // Set LED to indicate connecting status while we wait.
+    led.setState(CONNECTING_WIFI);
+    unsigned long startTime = millis(); // Record start time for the timeout check.
+
+    // Blocking wait loop: Check status repeatedly until connected, failed, or timed out.
+    while (millis() - startTime < timeout) {
+        // Allow the WiFiManager's internal state machine to run (handles events, retries).
+        wifiManager.handleWiFi();
+
+        // Check if connection succeeded.
+        if (wifiManager.getConnectionStatus() == WiFiManager::CONNECTED) {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println("WiFi connection established successfully within timeout.");
+            #endif
+            return true; // Connection successful.
+        }
+
+        // Check if the manager has determined a permanent failure (max retries hit).
+        if (wifiManager.getConnectionStatus() == WiFiManager::CONNECTION_FAILED) {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println("WiFi connection failed permanently (max retries reached by WiFiManager).");
+            #endif
+            break; // Exit the wait loop, connection failed.
+        }
+
+        // Small delay to prevent busy-waiting and allow other tasks (if any).
+        delay(100);
+    }
+
+    // If the loop finishes without returning true, it means connection failed or timed out.
+    #ifdef ENABLE_DEBUG_SERIAL
+        if (wifiManager.getConnectionStatus() != WiFiManager::CONNECTION_FAILED) {
+             Serial.println("WiFi connection attempt timed out after " + String(timeout) + " ms.");
+        }
+    #endif
+    led.setState(ERROR_WIFI); // Indicate WiFi error on the LED.
+    return false; // Connection failed within the specified timeout.
 }
 
 /**
- * @brief Performs a simple LED blink sequence.
- * (Documentation moved to header/previous example - implementation unchanged)
+ * @brief Performs a simple visual blink sequence using the status LED.
+ * Used to indicate activity or the start/end of a cycle.
  */
 void ledBlink() {
-  led.setState(ALL_OK); delay(700);
-  led.setState(OFF); delay(500);
-  led.setState(ALL_OK); delay(700);
-  led.setState(OFF); delay(500);
-  led.setState(ALL_OK); delay(700);
-  led.setState(OFF); delay(500);
+    // Sequence: OK -> OFF -> OK -> OFF -> OK -> OFF
+    led.setState(ALL_OK); delay(700);
+    led.setState(OFF); delay(500);
+    led.setState(ALL_OK); delay(700);
+    led.setState(OFF); delay(500);
+    led.setState(ALL_OK); delay(700);
+    led.setState(OFF); delay(500);
 }
 
 /**
- * @brief Initializes all connected sensors in sequence.
- * (Documentation moved to header/previous example - implementation unchanged)
+ * @brief Initializes all connected hardware sensors sequentially.
+ * Initializes DHT22, I2C bus (for BH1750 & MLX90640), BH1750, MLX90640, and OV2640.
+ * Includes necessary delays between initializations, especially for I2C sensors
+ * and the MLX90640 stabilization period. Sets error LED and returns false
+ * immediately if any sensor initialization fails.
+ * @return `true` if all sensors were initialized successfully. `false` if any sensor failed.
  */
 bool initializeSensors() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Initializing DHT22...");
-  #endif
-  dhtSensor.begin();
-
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Initializing I2C Bus (Pins SDA: " + String(I2C_SDA) + ", SCL: " + String(I2C_SCL) + ")...");
-  #endif
-  Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setClock(100000);
-  delay(100);
-
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Initializing BH1750 (Light Sensor)...");
-  #endif
-  if (!lightSensor.begin()) {
+    // --- Initialize DHT22 Sensor ---
     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("!!! BH1750 Init FAILED !!!");
+        Serial.println("Initializing DHT22 sensor...");
     #endif
-    led.setState(ERROR_SENSOR); delay(3000); return false;
-  }
-  delay(100);
+    // DHT library begin() usually doesn't return a status. Assume OK for now.
+    dhtSensor.begin();
+    delay(100); // Short delay after DHT init
 
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Initializing MLX90640 (Thermal Sensor)...");
-  #endif
-  if (!thermalSensor.begin()) {
+    // --- Initialize I2C Bus (Wire) ---
     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("!!! MLX90640 Init FAILED !!!");
+        Serial.println("Initializing I2C Bus (Pins SDA: " + String(I2C_SDA) + ", SCL: " + String(I2C_SCL) + ", Freq: 100kHz)...");
     #endif
-    led.setState(ERROR_SENSOR); delay(3000); return false;
-  }
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Waiting for MLX90640 stabilization (~2s)...");
-  #endif
-  delay(2000);
+    Wire.begin(I2C_SDA, I2C_SCL); // Initialize I2C with specified pins
+    Wire.setClock(100000);        // Set I2C clock speed (100kHz is common, check sensor datasheets)
+    delay(100);                   // Delay after I2C init
 
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Initializing OV2640 (Camera)...");
-  #endif
-  if (!camera.begin()) {
+    // --- Initialize BH1750 Light Sensor (via I2C) ---
     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("!!! OV2640 Init FAILED !!!");
+        Serial.println("Initializing BH1750 (Light Sensor) via I2C...");
     #endif
-    led.setState(ERROR_SENSOR); delay(3000); return false;
-  }
-  delay(500);
+    if (!lightSensor.begin()) { // begin() returns true on success, false on failure
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("!!! BH1750 Light Sensor Initialization FAILED !!!");
+        #endif
+        led.setState(ERROR_SENSOR); // Set LED to sensor error state
+        delay(3000);                // Show error state briefly
+        return false;               // Return failure status
+    }
+    delay(100); // Short delay after light sensor init
 
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("All sensors initialized successfully.");
-  #endif
-  return true;
+    // --- Initialize MLX90640 Thermal Sensor (via I2C) ---
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Initializing MLX90640 (Thermal Sensor) via I2C...");
+    #endif
+    if (!thermalSensor.begin()) { // begin() returns true on success, false on failure
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("!!! MLX90640 Thermal Sensor Initialization FAILED !!!");
+        #endif
+        led.setState(ERROR_SENSOR); // Set LED to sensor error state
+        delay(3000);                // Show error state briefly
+        return false;               // Return failure status
+    }
+    // IMPORTANT: Delay required after MLX90640 begin() before first readFrame()
+    // This allows the sensor to stabilize and acquire its first valid readings.
+    // The duration depends on the configured refresh rate (e.g., ~2s for 0.5Hz).
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Waiting for MLX90640 measurement stabilization (~2 seconds)...");
+    #endif
+    delay(2000); // Adjust delay based on MLX90640 refresh rate setting in MLX90640Sensor::begin()
+
+    // --- Initialize OV2640 Camera Sensor ---
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Initializing OV2640 (Visual Camera)...");
+    #endif
+    if (!camera.begin()) { // begin() returns true on success, false on failure
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("!!! OV2640 Camera Initialization FAILED !!!");
+        #endif
+        led.setState(ERROR_SENSOR); // Set LED to sensor error state
+        delay(3000);                // Show error state briefly
+        // Note: Consider de-initializing already initialized sensors here if needed?
+        return false;               // Return failure status
+    }
+    delay(500); // Delay after camera init
+
+    // If execution reaches here, all sensors initialized successfully.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("All sensors initialized successfully.");
+    #endif
+    return true; // Return success status
 }
 
 /**
- * @brief Reads environmental data (light, temp, humidity) with retries
- * and sends it to the configured API endpoint. Sets LED state and returns status.
- * This version orchestrates calls to helper functions for reading and sending.
- * @return True if data was read and sent successfully, False otherwise.
+ * @brief Orchestrates reading environmental data and sending it to the server.
+ * This function calls helper functions that handle sensor reading with retries
+ * (`readLightSensorWithRetry`, `readDHTSensorWithRetry`) and data sending
+ * (`sendEnvironmentDataToServer`). It manages the LED status during the process
+ * and returns an overall success/failure status for the entire environmental task.
+ * @return `true` if sensor data was successfully read AND successfully sent to the server.
+ * `false` if either the sensor reading or the data sending failed.
  */
 bool readEnvironmentData() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("--- Reading Environment Sensors ---");
-  #endif
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("--- Reading Environment Sensors & Sending Data ---");
+    #endif
 
-  float light = -1.0; // Initialize with invalid value
-  float temp = NAN;   // Initialize with invalid value
-  float hum = NAN;    // Initialize with invalid value
+    float lightLevel = -1.0f; // Initialize with an invalid value typical for light sensor errors
+    float temperature = NAN;  // Initialize with Not-a-Number for temp/humidity errors
+    float humidity = NAN;     // Initialize with Not-a-Number
 
-  led.setState(TAKING_DATA); // Set LED to indicate data capture phase
-  delay(1000); // Short delay before reading sensors
-  
-  // Read sensors using helper functions with retries
-  bool lightOK = readLightSensorWithRetry(light);
-  bool dhtOK = readDHTSensorWithRetry(temp, hum);
+    led.setState(TAKING_DATA); // Set LED to indicate data acquisition phase.
+    delay(1000); // Short delay perhaps allowing sensors to stabilize further if needed.
 
-  // Check if all readings were successful
-  if (!lightOK || !dhtOK) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Failed to read one or more environment sensors after retries.");
-      #endif
-      // Set a generic data error state; specific sensor read function might log details
-      led.setState(ERROR_DATA);
-      delay(3000); // Show error
-      return false; // Indicate overall failure for this task
-  }
+    // Attempt to read sensors using helper functions that include retry logic.
+    bool lightOK = readLightSensorWithRetry(lightLevel);
+    bool dhtOK = readDHTSensorWithRetry(temperature, humidity);
 
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("All environment sensors read successfully. Proceeding to send...");
-    Serial.printf("  Read values: Light=%.2f lx, Temp=%.2f C, Hum=%.2f %%\n", light, temp, hum);
-  #endif
+    // Check if all critical sensor readings were successful.
+    if (!lightOK || !dhtOK) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Error: Failed to read one or more environment sensors after retries.");
+            // Specific failure details should be logged within the retry functions if debug is enabled.
+        #endif
+        // Set a generic data error state; let the user know something went wrong with data collection.
+        led.setState(ERROR_DATA);
+        delay(3000); // Display the error state briefly.
+        return false; // Indicate overall failure for the environmental data task.
+    }
 
-  // Attempt to send the valid data using a helper function
-  if (!sendEnvironmentDataToServer(light, temp, hum)) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Failed to send environment data to server.");
-      #endif
-      // Error LED state and delay are handled within sendEnvironmentDataToServer
-      return false; // Indicate overall failure for this task
-  }
+    // If all readings were successful, proceed to send the data.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Environment sensors read successfully. Preparing to send...");
+        Serial.printf("  Read Values: Light=%.2f lx, Temperature=%.2f C, Humidity=%.2f %%\n", lightLevel, temperature, humidity);
+    #endif
 
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Environment data sent successfully to server.");
-  #endif
-  return true; // Indicate overall success for this task
+    // Attempt to send the collected data to the server using a helper function.
+    if (!sendEnvironmentDataToServer(lightLevel, temperature, humidity)) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Error: Failed to send environment data to the server.");
+            // Specific failure details should be logged within the sending function.
+        #endif
+        // LED state (ERROR_SEND) and delay should be handled within sendEnvironmentDataToServer.
+        return false; // Indicate overall failure for the environmental data task.
+    }
+
+    // If sending was also successful.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Environment data sent successfully to the server.");
+    #endif
+    // Optionally set LED back to a neutral state like ALL_OK briefly before next task.
+    // led.setState(ALL_OK); delay(500);
+    return true; // Indicate overall success for the environmental data task.
 }
 
+
 /**
- * @brief Captures thermal data (MLX90640) and a visual image (OV2640).
- * Orchestrates calls to helper functions for capturing and allocating memory.
- * Caller must free the allocated buffers (*thermalData and *jpegImage).
- * Sets LED state and returns status.
- *
- * @param[out] jpegImage Pointer to a uint8_t pointer, will be set to the allocated JPEG buffer address.
- * @param[out] jpegLength Reference to size_t, will be set to the JPEG buffer size.
- * @param[out] thermalData Pointer to a float pointer, will be set to the allocated thermal data buffer address.
- * @return True if both captures and allocations were successful, False otherwise.
+ * @brief Orchestrates capturing both thermal and visual images.
+ * Calls helper functions (`captureAndCopyThermalData`, `captureVisualJPEG`)
+ * that handle the actual capture and memory allocation. This function manages
+ * the output pointers and ensures resources are handled correctly if one capture fails.
+ * Sets LED state to indicate data capture error on failure.
+ * @param[out] jpegImage Pointer to a `uint8_t*`. On success, this will point to the buffer containing the allocated JPEG data. Set to `nullptr` on failure.
+ * @param[out] jpegLength Reference to a `size_t`. On success, this will contain the size (in bytes) of the JPEG data. Set to 0 on failure.
+ * @param[out] thermalData Pointer to a `float*`. On success, this will point to the buffer containing the allocated thermal data (768 floats). Set to `nullptr` on failure.
+ * @return `true` if BOTH the thermal data capture/copy AND the visual JPEG capture were successful.
+ * `false` if either capture failed. Resources allocated by a successful first capture will be freed if the second fails.
  */
 bool captureImages(uint8_t** jpegImage, size_t& jpegLength, float** thermalData) {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("--- Capturing Images ---");
-  #endif
-  // Ensure output pointers are null initially
-  *jpegImage = nullptr;
-  *thermalData = nullptr;
-  jpegLength = 0;
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("--- Capturing Thermal and Visual Images ---");
+    #endif
+    // Ensure output pointers are initialized to null/zero before attempting capture.
+    *jpegImage = nullptr;
+    *thermalData = nullptr;
+    jpegLength = 0;
 
-  // 1. Capture and Copy Thermal Data
-  if (!captureAndCopyThermalData(thermalData)) {
-      // Error logged within helper function
-      led.setState(ERROR_DATA);
-      delay(3000);
-      return false; // Thermal capture/copy failed
-  }
+    // Set LED to indicate data acquisition phase.
+    led.setState(TAKING_DATA);
+    delay(1000); // Optional delay before capture.
 
-  // 2. Capture Visual JPEG Data
-  if (!captureVisualJPEG(jpegImage, jpegLength)) {
-      // Error logged within helper function
-      led.setState(ERROR_DATA);
-      delay(3000);
+    // --- 1. Capture Thermal Data ---
+    // This helper reads the frame and *allocates* memory for the thermal data copy.
+    if (!captureAndCopyThermalData(thermalData)) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Error: Failed to capture or copy thermal data.");
+        #endif
+        // If thermal data capture fails, set error LED and return immediately.
+        // No visual capture attempted, no buffers need freeing yet.
+        led.setState(ERROR_DATA);
+        delay(3000); // Show error state briefly.
+        return false;
+    }
+    // If thermal capture succeeded, *thermalData now points to allocated memory.
 
-      // *** CRITICAL: Free thermal data buffer if JPEG capture failed ***
-      if (*thermalData != nullptr) {
-          #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("Freeing thermal data buffer due to JPEG capture failure.");
-          #endif
-          free(*thermalData);
-          *thermalData = nullptr; // Avoid dangling pointer
-      }
-      return false; // Visual capture failed
-  }
+    // --- 2. Capture Visual JPEG Data ---
+    // This helper captures the image and *allocates* memory for the JPEG data.
+    if (!captureVisualJPEG(jpegImage, jpegLength)) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Error: Failed to capture visual JPEG image.");
+        #endif
+        // If visual capture fails, set error LED.
+        led.setState(ERROR_DATA);
+        delay(3000); // Show error state briefly.
 
-  // If both captures succeeded
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Both thermal and visual images captured successfully.");
-  #endif
-  return true;
+        // *** CRITICAL CLEANUP ***: Since thermal capture succeeded but visual failed,
+        // we MUST free the buffer allocated for thermal data to prevent a memory leak.
+        if (*thermalData != nullptr) {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println("Cleaning up thermal data buffer due to subsequent JPEG capture failure.");
+            #endif
+            free(*thermalData);       // Free the previously allocated thermal buffer.
+            *thermalData = nullptr;   // Avoid dangling pointer.
+        }
+        return false; // Return failure status for the overall capture task.
+    }
+    // If execution reaches here, *thermalData and *jpegImage point to allocated buffers.
+
+    // If both captures were successful.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Thermal and visual images captured successfully.");
+    #endif
+    // Optionally set LED back to OK briefly.
+    // led.setState(ALL_OK); delay(500);
+    return true; // Indicate overall success for the image capture task.
 }
 
+
 /**
- * @brief Sends the captured thermal and visual image data.
- * (Documentation moved to header/previous example - implementation unchanged)
+ * @brief Sends the captured thermal and visual image data to the server via multipart POST.
+ * Uses the `MultipartDataSender` utility class to perform the HTTP request.
+ * Sets LED status according to the outcome (SENDING_DATA during attempt, ERROR_SEND on failure).
+ * @param jpegImage Pointer to the buffer containing the JPEG image data.
+ * @param jpegLength Size of the JPEG image data in bytes.
+ * @param thermalData Pointer to the buffer containing the thermal data (768 floats).
+ * @return `true` if the data was sent successfully (HTTP 2xx response received).
+ * `false` otherwise (HTTP request failed or server returned error).
  */
 bool sendImageData(uint8_t* jpegImage, size_t jpegLength, float* thermalData) {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Sending thermal and image data via HTTP POST (multipart) to " + config.api_img + "...");
-  #endif
-  // Use configuration value for API URL
-  bool sendSuccess = MultipartDataSender::IOThermalAndImageData(
-    config.api_img, thermalData, jpegImage, jpegLength
-  );
-  delay(1000);
+    // Check for valid input pointers and length, though captureImages should ensure this if it returned true.
+    if (!jpegImage || jpegLength == 0 || !thermalData) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Error: Invalid data provided to sendImageData (null pointers or zero length).");
+        #endif
+        led.setState(ERROR_DATA); // Indicate a data problem
+        delay(3000);
+        return false;
+    }
 
-  if (!sendSuccess) {
-     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("HTTP POST for image data failed.");
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Preparing to send thermal and image data via HTTP POST (multipart)...");
+        Serial.println("Target URL: " + config.api_img);
     #endif
-    led.setState(ERROR_SEND);
-    delay(3000);
-    return false;
-  }
+    led.setState(SENDING_DATA); // Indicate data transmission phase.
+    delay(1000); // Optional short delay before sending.
 
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Image data HTTP POST successful.");
-  #endif
-  return true;
+    // Call the static method from MultipartDataSender, using the API URL from config.
+    bool sendSuccess = MultipartDataSender::IOThermalAndImageData(
+        config.api_img,   // Target API endpoint URL from configuration
+        thermalData,      // Pointer to thermal data buffer
+        jpegImage,        // Pointer to JPEG image buffer
+        jpegLength        // Length of JPEG image data
+    );
+
+    // Check the result of the send operation.
+    if (!sendSuccess) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Error: HTTP POST request for image/thermal data failed.");
+            // More specific errors might be logged within MultipartDataSender if debug is enabled there.
+        #endif
+        led.setState(ERROR_SEND); // Indicate a sending/communication error.
+        delay(3000);              // Show error state briefly.
+        // ErrorLogger::sendLog(String(API_LOGGING), "IMG_SEND_FAIL", "Image/Thermal data send failed"); // Example logging
+        return false; // Return failure status.
+    }
+
+    // If sending was successful.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Image and thermal data sent successfully via HTTP POST.");
+    #endif
+    // Optionally set LED back to OK briefly.
+    // led.setState(ALL_OK); delay(500);
+    return true; // Return success status.
 }
 
 /**
- * @brief Cleans up allocated resources (memory, camera).
- * (Documentation moved to header/previous example - implementation unchanged)
+ * @brief Cleans up resources allocated during the operational cycle.
+ * Specifically, frees the memory buffers allocated for the JPEG image
+ * and the thermal data copy using `free()`. Also deinitializes the
+ * camera peripheral by calling `camera.end()` to release hardware resources.
+ * This should be called before entering deep sleep.
+ * @param jpegImage Pointer to the allocated JPEG image buffer (or nullptr if allocation failed/not captured).
+ * @param thermalData Pointer to the allocated thermal data buffer (or nullptr if allocation failed/not captured).
  */
 void cleanupResources(uint8_t* jpegImage, float* thermalData) {
-  if (jpegImage != nullptr) {
     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("Freeing JPEG image buffer...");
+        Serial.println("--- Cleaning Up Resources ---");
     #endif
-    free(jpegImage);
-  }
-  if (thermalData != nullptr) {
-     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("Freeing thermal data buffer...");
+
+    // Free the JPEG image buffer if it was allocated.
+    if (jpegImage != nullptr) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Freeing JPEG image buffer...");
+        #endif
+        free(jpegImage); // Use free() as memory was likely allocated by ps_malloc/malloc
+        // No need to set jpegImage = nullptr here as it's a local copy of the pointer in loop()
+    } else {
+         #ifdef ENABLE_DEBUG_SERIAL
+            // Serial.println("No JPEG image buffer to free.");
+         #endif
+    }
+
+    // Free the thermal data buffer if it was allocated.
+    if (thermalData != nullptr) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Freeing thermal data buffer...");
+        #endif
+        free(thermalData); // Use free() as memory was likely allocated by ps_malloc/malloc
+    } else {
+         #ifdef ENABLE_DEBUG_SERIAL
+            // Serial.println("No thermal data buffer to free.");
+         #endif
+    }
+
+    // Deinitialize the camera peripheral to release hardware resources (I2S, DMA etc.)
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Deinitializing camera peripheral (calling camera.end())...");
     #endif
-    free(thermalData);
-  }
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Deinitializing camera (calling camera.end())...");
-  #endif
-  camera.end();
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Camera deinitialized.");
-  #endif
-  delay(50);
+    camera.end(); // Calls esp_camera_deinit() internally
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Camera deinitialized.");
+    #endif
+
+    delay(50); // Short delay after cleanup if needed.
 }
 
 /**
- * @brief Enters ESP32 deep sleep mode.
- * (Documentation moved to header/previous example - implementation unchanged)
+ * @brief Enters ESP32 deep sleep mode for a specified number of seconds.
+ * Configures the ESP32 to wake up using the timer peripheral after the
+ * given duration. Turns off the status LED before sleeping. Execution
+ * effectively stops here until the device wakes up (which causes a reset).
+ * @param seconds The duration (unsigned long) to sleep in seconds.
  */
 void deepSleep(unsigned long seconds) {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.printf("Entering deep sleep for %lu seconds...\n", seconds);
-    Serial.println("--------------------------------------");
-    delay(100);
-  #endif
-  led.turnOffAll();
-  esp_sleep_enable_timer_wakeup(seconds * 1000000ULL);
-  esp_deep_sleep_start();
-  // Execution stops here
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.printf("Entering deep sleep for %lu seconds...\n", seconds);
+        Serial.println("--------------------------------------");
+        Serial.flush(); // Ensure all serial messages are sent before sleeping
+        delay(100);     // Short delay for serial flush
+    #endif
+    led.turnOffAll(); // Turn off LED before sleeping.
+
+    // Configure the timer wakeup source.
+    // The duration is specified in microseconds (seconds * 1,000,000).
+    // Use ULL suffix for large constants to avoid overflow.
+    esp_sleep_enable_timer_wakeup(seconds * 1000000ULL);
+
+    // Enter deep sleep mode. The device will reset upon waking up.
+    esp_deep_sleep_start();
+
+    // --- Code execution will NOT reach here ---
 }
 
-// --- Setup Helper Function Implementations ---
+
+// =========================================================================
+// ===                  SETUP HELPER IMPLEMENTATIONS                     ===
+// =========================================================================
 
 /**
- * @brief Initializes the Serial port if debug is enabled.
+ * @brief Initializes the Serial port for debugging output if enabled.
+ * Starts Serial communication at 115200 baud and prints a boot/wake message
+ * including the device's unique chip ID (MAC address based).
  */
 void initSerial() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.begin(115200);
-    while (!Serial); // Optional: wait for serial connection
-    uint64_t chipid = ESP.getEfuseMac();
-    Serial.printf("\n--- Device Booting / Waking Up (ID: %04X%08X) ---\n", (uint16_t)(chipid>>32), (uint32_t)chipid);
-  #endif
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.begin(115200); // Start Serial communication
+        // while (!Serial); // Optional: Wait for a serial monitor connection - remove for unattended operation.
+        delay(1000); // Give Serial time to initialize, especially after reset.
+        uint64_t chipid = ESP.getEfuseMac(); // Get unique chip ID (MAC address)
+        Serial.printf("\n--- Device Booting / Waking Up (Chip ID: %04X%08X) ---\n",
+                      (uint16_t)(chipid >> 32), // High part of MAC
+                      (uint32_t)chipid);        // Low part of MAC
+        Serial.println("Debug Serial Enabled (Rate: 115200)");
+    #endif
 }
 
 /**
-* @brief Initializes the status LED.
-*/
+ * @brief Initializes the status LED.
+ * Calls the begin() method of the global LEDStatus object and sets
+ * an initial state (e.g., ALL_OK) to indicate the setup process has started.
+ */
 void initLED() {
-  led.begin();
-  led.setState(ALL_OK); // Set initial state
+    led.begin();   // Initialize the NeoPixel library via the wrapper
+    led.setState(ALL_OK); // Set an initial "OK" state during boot/setup
 }
 
 /**
-* @brief Initializes the LittleFS filesystem.
-* Attempts to mount, and formats if mounting fails initially.
-* Sets error LED and returns false on critical failure.
-* @return True if filesystem is mounted successfully, False otherwise.
-*/
+ * @brief Initializes the LittleFS filesystem.
+ * Attempts to mount the filesystem. If mounting fails, it attempts to
+ * format the filesystem and then mount it again. If formatting also fails,
+ * it indicates a critical error (sets error LED) and returns false.
+ * @return `true` if the filesystem is successfully mounted (either initially or after formatting).
+ * `false` if mounting and formatting both fail (critical error).
+ */
 bool initFilesystem() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Mounting LittleFS...");
-  #endif
-  if (!LittleFS.begin(false)) { // false = don't format on fail initially
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("LittleFS mount failed! Trying to format...");
-      #endif
-      // If mount failed, try formatting and mounting again
-      if (!LittleFS.begin(true)) { // true = format if mount fails
-          #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("CRITICAL: Formatting LittleFS failed!");
-          #endif
-          led.setState(ERROR_DATA); // Use ERROR_DATA for FS failure
-          delay(3000); // Show error
-          return false; // Return critical failure
-      } else {
-          #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("LittleFS formatted successfully. Config file may need uploading.");
-          #endif
-          // Filesystem formatted, loadConfiguration will use defaults.
-      }
-  }
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("LittleFS mounted successfully.");
-  #endif
-  return true; // Filesystem mounted
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Initializing LittleFS filesystem...");
+    #endif
+    // Attempt to mount LittleFS. false = do not format if mount fails on the first try.
+    if (!LittleFS.begin(false)) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Warning: Initial LittleFS mount failed! Attempting to format...");
+        #endif
+        // If initial mount failed, try again with format_if_failed = true.
+        // This will format the filesystem ONLY if it cannot be mounted.
+        delay(1000); // Give it a moment before formatting
+        if (!LittleFS.begin(true)) { // true = format if mount still fails
+            // If begin(true) also fails, formatting failed - this is a critical error.
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println("CRITICAL ERROR: Formatting LittleFS failed! Check hardware/partition scheme.");
+            #endif
+            led.setState(ERROR_DATA); // Use a relevant error state (e.g., data/storage error)
+            delay(5000);              // Show error state clearly
+            return false;             // Return critical failure status.
+        } else {
+            // Filesystem was successfully formatted and mounted.
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println("LittleFS formatted successfully. Filesystem is now empty.");
+                Serial.println("Configuration file will be missing; defaults will be used.");
+            #endif
+            // Proceed, loadConfiguration will handle missing file using defaults.
+        }
+    }
+    // If execution reaches here, LittleFS is mounted (either initially or after format).
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("LittleFS mounted successfully.");
+        // Optional: List directory contents or show FS info
+        // File root = LittleFS.open("/"); File file = root.openNextFile(); ... etc.
+        // Serial.printf(" FS Info: Total bytes: %ld, Used bytes: %ld\n", LittleFS.totalBytes(), LittleFS.usedBytes());
+    #endif
+    return true; // Filesystem is ready.
 }
 
+
 /**
-* @brief Loads configuration from LittleFS and sets WiFi credentials.
-* Prints status messages if debug is enabled. Uses default config values on failure.
-*/
+ * @brief Loads the application configuration and sets WiFi credentials.
+ * Calls `loadConfiguration()` to populate the global `config` struct from
+ * the file specified by `CONFIG_FILENAME`. If loading fails, default values
+ * in the `config` struct are used. Then, it passes the loaded (or default)
+ * SSID and password to the `wifiManager` instance.
+ */
 void loadConfigAndSetCredentials() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Loading configuration from " + String(CONFIG_FILENAME) + "...");
-  #endif
-  if (!loadConfiguration(CONFIG_FILENAME)) {
-     #ifdef ENABLE_DEBUG_SERIAL
-       Serial.println("Failed to load configuration or file not found. Using defaults.");
-     #endif
-     // Continue with default values stored in the global 'config' object
-  }
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Loading configuration from file: " + String(CONFIG_FILENAME));
+    #endif
+    // Attempt to load config. If it fails, the global 'config' struct retains defaults.
+    if (!loadConfiguration(CONFIG_FILENAME)) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Warning: loadConfiguration failed or file not found. Proceeding with default config values.");
+        #endif
+    }
 
-  // Set WiFi credentials in the WiFiManager instance
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Setting WiFi credentials...");
-  #endif
-  wifiManager.setCredentials(config.wifi_ssid, config.wifi_pass);
+    // Pass the loaded or default credentials to the WiFi Manager instance.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Setting WiFi credentials in WiFiManager for SSID: " + config.wifi_ssid);
+    #endif
+    wifiManager.setCredentials(config.wifi_ssid, config.wifi_pass);
 }
 
 /**
-* @brief Handles the logic when sensor initialization fails.
-* Sets error LED, unmounts LittleFS, and enters deep sleep.
-*/
+ * @brief Handles the failure scenario during sensor initialization in setup().
+ * Logs the failure (if debug enabled), ensures the error LED state is set
+ * (should be set by the failing sensor init function), unmounts the filesystem
+ * cleanly, and then enters deep sleep using the configured sleep duration.
+ * This function does not return, as `deepSleep()` halts execution.
+ */
 void handleSensorInitFailure() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Sensor initialization failed. Entering deep sleep.");
-  #endif
-  // LED state should have been set by the failing init helper function.
-  LittleFS.end(); // Unmount filesystem before sleeping
-  delay(500);     // Short delay
-  deepSleep(config.sleep_sec); // Use sleep duration from config (or default)
-  // Execution stops here.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("CRITICAL ERROR: Sensor initialization failed during setup.");
+        Serial.println("Preparing to enter deep sleep to save power / allow potential recovery on wake.");
+    #endif
+    // The specific sensor init function should have already set led.setState(ERROR_SENSOR).
+    // We might add a delay here to ensure the LED state is visible.
+    delay(3000);
+
+    // Unmount the filesystem cleanly before sleeping.
+    LittleFS.end();
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Unmounted LittleFS.");
+    #endif
+    delay(500); // Short delay before sleeping.
+
+    // Enter deep sleep using the configured sleep duration.
+    deepSleep(config.sleep_sec);
+    // --- Execution stops here ---
 }
 
-// --- Loop Helper Function Implementations ---
+
+// =========================================================================
+// ===                   LOOP HELPER IMPLEMENTATIONS                     ===
+// =========================================================================
 
 /**
- * @brief Handles WiFi connection check at the start of the loop.
- * Calls ensureWiFiConnected and initiates sleep cycle immediately on failure.
- * @return True if WiFi is connected, False if connection failed (and sleep was initiated).
+ * @brief Manages the WiFi connection check at the beginning of each loop cycle.
+ * Calls `ensureWiFiConnected` which blocks until connected or timeout/failure.
+ * If connection fails, it initiates the deep sleep sequence immediately, including
+ * resource cleanup, as proceeding without WiFi is not viable for this application.
+ * @return `true` if WiFi connection is verified or established successfully.
+ * `false` if WiFi connection fails (in which case deep sleep is initiated and this function technically doesn't return normally).
  */
 bool handleWiFiConnection() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Checking WiFi connection status...");
-  #endif
-  if (!ensureWiFiConnected(WIFI_CONNECT_TIMEOUT_MS)) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("WiFi connection failed or timed out in loop. Entering sleep.");
-      #endif
-      delay(3000); // Show error color
-      // Need cleanup before sleeping even if no buffers were allocated this cycle, primarily for camera
-      cleanupResources(nullptr, nullptr); // Pass nullptrs as buffers aren't allocated yet
-      LittleFS.end(); // Ensure filesystem is unmounted
-      deepSleep(config.sleep_sec);
-      // Execution stops here if deepSleep is entered
-      return false; // Indicate connection failure
-  }
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("WiFi connection OK.");
-  #endif
-  return true; // Indicate connection success
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("--- Checking WiFi Connection ---");
+    #endif
+    // ensureWiFiConnected blocks until connected, failed, or timeout.
+    if (!ensureWiFiConnected(WIFI_CONNECT_TIMEOUT_MS)) {
+        // If connection failed after blocking wait.
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Error: WiFi connection could not be established within timeout in main loop.");
+            Serial.println("Entering deep sleep cycle immediately.");
+        #endif
+        // The LED should already be set to ERROR_WIFI by ensureWiFiConnected.
+        delay(3000); // Ensure the error LED is visible.
+
+        // --- Critical: Need to cleanup resources before sleeping ---
+        // Even though image buffers weren't allocated yet in this cycle,
+        // the camera might have been initialized (if setup succeeded).
+        // Passing nullptrs for buffers is safe for cleanupResources.
+        cleanupResources(nullptr, nullptr);
+
+        // Unmount filesystem before sleeping.
+        LittleFS.end();
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Unmounted LittleFS.");
+        #endif
+
+        // Enter deep sleep.
+        deepSleep(config.sleep_sec);
+        // --- Execution stops here ---
+        return false; // Technically unreachable, but indicates failure path.
+    }
+
+    // If ensureWiFiConnected returned true.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("WiFi Connection OK.");
+        // Optional: Check actual internet connectivity if needed here using wifiManager.checkInternetConnection()
+        // if (!wifiManager.checkInternetConnection()) { ... handle lack of internet ... }
+    #endif
+    return true; // Indicate WiFi is connected and ready.
 }
 
 /**
-* @brief Performs the tasks related to reading and sending environmental data.
-* Calls readEnvironmentData() and logs status.
-* @return True if tasks were successful, False otherwise.
-*/
+ * @brief Performs the environmental data task sequence: reading sensors and sending data.
+ * Calls the `readEnvironmentData` function which handles the sub-steps (reading
+ * with retries, sending data) and manages LED status for this task.
+ * Logs the overall success or failure of the task.
+ * @return `true` if the environmental data task (read & send) completed successfully.
+ * `false` otherwise.
+ */
 bool performEnvironmentTasks() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("--- Performing Environment Tasks ---");
-    Serial.println("Task: Read & Send Environmental Data");
-  #endif
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("\n--- Performing Environment Data Tasks ---");
+    #endif
 
-  if (!readEnvironmentData()) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Task Failed: Read/Send Environmental Data.");
-      #endif
-      // Error LED state is set within readEnvironmentData on failure
-      return false;
-  }
+    // Call the function that orchestrates reading and sending.
+    if (!readEnvironmentData()) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Result: Environment Data Task FAILED.");
+        #endif
+        // Error LED state should be set within readEnvironmentData on failure.
+        return false; // Indicate task failure.
+    }
 
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Task OK: Environmental data read and sent.");
-  #endif
-  return true;
+    // If readEnvironmentData returned true.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Result: Environment Data Task SUCCEEDED.");
+    #endif
+    return true; // Indicate task success.
 }
 
 /**
-* @brief Performs tasks related to capturing and sending (or saving) image data.
-* Calls captureImages, sendImageData, and potentially saveDataToFS. Manages LED states.
-* @param[out] jpegImage Pointer to the JPEG image buffer pointer (will be allocated by captureImages).
-* @param[out] jpegLength Reference to the JPEG image length.
-* @param[out] thermalData Pointer to the thermal data buffer pointer (will be allocated by captureImages).
-* @return True if tasks were successful (capture & send OK), False otherwise (capture failed OR send failed).
-*/
+ * @brief Performs the image data task sequence: capturing images and sending data.
+ * Calls `captureImages` to get thermal and visual data buffers, then calls
+ * `sendImageData` to transmit them. Manages LED status updates during the process.
+ * Note: Memory allocated by `captureImages` (pointed to by the output parameters)
+ * MUST be freed later by `cleanupResources`.
+ * @param[out] jpegImage Pointer to a `uint8_t*` variable in the caller (loop). On successful capture, this variable will be updated to point to the allocated JPEG buffer.
+ * @param[out] jpegLength Reference to a `size_t` variable in the caller. On successful capture, this will be updated with the JPEG buffer size.
+ * @param[out] thermalData Pointer to a `float*` variable in the caller. On successful capture, this variable will be updated to point to the allocated thermal data buffer.
+ * @return `true` if both image capture AND data sending were successful.
+ * `false` if either image capture failed OR data sending failed.
+ */
 bool performImageTasks(uint8_t** jpegImage, size_t& jpegLength, float** thermalData) {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("--- Performing Image Tasks ---");
-    Serial.println("Task: Capture Images (Thermal & Visual)");
-  #endif
-  led.setState(TAKING_DATA); // Set LED for capture phase
-  delay(1000); // Short delay before capturing
-  // Ensure pointers are null initially
-  *jpegImage = nullptr;
-  *thermalData = nullptr;
-  jpegLength = 0;
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("\n--- Performing Image Data Tasks ---");
+    #endif
+    // Note: jpegImage, jpegLength, thermalData are passed by reference/pointer
+    // so captureImages can update the caller's variables with buffer addresses/size.
 
-  // 1. Capture Images
-  if (!captureImages(jpegImage, jpegLength, thermalData)) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Task Failed: Capture Images.");
-      #endif
-      // Resources allocated within captureImages should be freed by it on failure
-      return false; // Return failure status
-  }
-   #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("Task OK: Images captured. Proceeding to send...");
-   #endif
+    // --- 1. Capture Images ---
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Task Step: Capture Images (Thermal & Visual)");
+    #endif
+    led.setState(TAKING_DATA); // Set LED for capture phase.
+    delay(1000); // Optional delay.
 
-  // 2. Send Image Data (if capture was OK)
-  led.setState(SENDING_DATA); // Set LED for sending phase
-  delay(1000); // Short delay before sending
+    if (!captureImages(jpegImage, jpegLength, thermalData)) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Result: Image Task FAILED at Capture stage.");
+        #endif
+        // Error LED state and cleanup of partial captures handled within captureImages.
+        return false; // Indicate overall task failure.
+    }
+    // If capture succeeded, jpegImage and thermalData now point to allocated buffers.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Task Step: Images captured successfully.");
+    #endif
 
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Task: Send Image Data");
-  #endif
-  if (!sendImageData(*jpegImage, jpegLength, *thermalData)) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Task Failed: Send Image Data. Attempting to save to FS (if implemented)...");
-      #endif
-      // Even if saving fails, we return false because the primary send failed.
-      return false; // Return failure status
-  }
+    // --- 2. Send Image Data ---
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Task Step: Send Image Data");
+    #endif
+    led.setState(SENDING_DATA); // Set LED for sending phase.
+    delay(1000); // Optional delay.
 
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Task OK: Image data sent successfully.");
-  #endif
-  return true; // All image tasks successful
+    // Pass the pointers to the allocated buffers to the sending function.
+    if (!sendImageData(*jpegImage, jpegLength, *thermalData)) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Result: Image Task FAILED at Send stage.");
+        #endif
+        // Error LED state handled within sendImageData.
+        // Note: We still need to free the buffers allocated in captureImages,
+        // which happens later in cleanupResources().
+        // Consider if data should be saved locally on send failure (future enhancement?).
+        return false; // Indicate overall task failure because sending failed.
+    }
+
+    // If sending was also successful.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Result: Image Task SUCCEEDED (Capture & Send).");
+    #endif
+    return true; // Indicate overall task success.
 }
 
 /**
-* @brief Prepares the device for deep sleep.
-* Sets the final LED status based on cycle success, performs a final blink,
-* and unmounts the LittleFS filesystem.
-* @param cycleStatusOK Indicates if the main loop cycle completed without errors.
-*/
+ * @brief Performs final actions before entering deep sleep.
+ * Sets the final status LED state based on the overall success of the loop cycle.
+ * Performs a final visual blink sequence. Unmounts the LittleFS filesystem.
+ * @param cycleStatusOK Boolean indicating if the main loop cycle completed without any detected errors.
+ */
 void prepareForSleep(bool cycleStatusOK) {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("--- Preparing for Sleep ---");
-  #endif
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("\n--- Preparing for Deep Sleep ---");
+    #endif
 
-  // Set final LED status
-  if (cycleStatusOK) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Cycle OK. Setting LED to ALL_OK.");
-      #endif
-  } else {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Cycle finished with errors. LED should show last error state.");
-      #endif
-  }
+    // Set final LED status to reflect the cycle outcome.
+    if (cycleStatusOK) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Cycle completed successfully. Setting final LED state to ALL_OK.");
+        #endif
+        led.setState(ALL_OK); // Indicate successful cycle.
+        delay(1000); // Show OK state briefly.
+    } else {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("Cycle completed with errors. LED should reflect the last error encountered.");
+            // The LED state should already be showing the last error (e.g., ERROR_SEND, ERROR_DATA).
+        #endif
+        // Keep the last error state visible for a moment.
+        delay(3000);
+    }
 
-  // Perform final blink sequence
-  ledBlink();
+    // Perform a final blink sequence regardless of success/failure? Or only on success?
+    // Current implementation blinks regardless.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Performing final LED blink sequence...");
+    #endif
+    ledBlink(); // Perform the blink sequence.
 
-  // Unmount LittleFS before sleeping
-  LittleFS.end();
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Unmounted LittleFS.");
-  #endif
+    // Unmount the LittleFS filesystem cleanly before sleeping.
+    // This ensures filesystem integrity.
+    LittleFS.end();
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("Unmounted LittleFS filesystem.");
+    #endif
 }
 
-// --- Environment Task Helper Function Implementations ---
+
+// =========================================================================
+// ===             ENVIRONMENT TASK HELPER IMPLEMENTATIONS             ===
+// =========================================================================
 
 /**
- * @brief Reads the light sensor (BH1750) value with retries.
- * @param[out] lightLevel Reference to store the successfully read light level (in lux).
- * @return True if read successfully within retries, False otherwise.
+ * @brief Reads the BH1750 light sensor value, attempting multiple times if necessary.
+ * Calls the `lightSensor.readLightLevel()` method up to `SENSOR_READ_RETRIES` times
+ * with a short delay between attempts until a valid reading (>= 0) is obtained.
+ * @param[out] lightLevel Reference to a float variable where the successfully read light level (in lux) will be stored. Initialized to -1.0f on entry.
+ * @return `true` if a valid light level was read successfully within the allowed retries.
+ * `false` otherwise.
  */
 bool readLightSensorWithRetry(float &lightLevel) {
-  lightLevel = -1.0; // Ensure initial invalid state
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.print("Reading light sensor");
-  #endif
-  for (int i = 0; i < SENSOR_READ_RETRIES; i++) {
-      lightLevel = lightSensor.readLightLevel();
-      if (lightLevel >= 0) { // BH1750 library returns >= 0 on success
-          #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(" OK (" + String(lightLevel) + " lx)");
-          #endif
-          return true; // Success
-      }
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.print(".");
-      #endif
-      delay(500); // Wait before retry
-  }
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println(" FAILED after retries.");
-  #endif
-  return false; // Failed after all retries
+    lightLevel = -1.0f; // Ensure initial state represents failure.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.print("  Reading light sensor (BH1750)...");
+    #endif
+    for (int i = 0; i < SENSOR_READ_RETRIES; ++i) {
+        lightLevel = lightSensor.readLightLevel(); // Attempt to read.
+        // BH1750 library typically returns >= 0 for valid lux readings, negative on error.
+        if (lightLevel >= 0.0f) {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println(" OK (" + String(lightLevel, 2) + " lx)"); // Print with 2 decimal places
+            #endif
+            return true; // Successful read.
+        }
+        // If read failed...
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.print("."); // Print dot to indicate retry attempt
+        #endif
+        delay(500); // Wait half a second before the next attempt.
+    }
+    // If loop completes without returning true, all retries failed.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(" FAILED after " + String(SENSOR_READ_RETRIES) + " retries.");
+    #endif
+    return false; // Indicate failure after all retries.
 }
 
+
 /**
-* @brief Reads the temperature and humidity sensor (DHT22) values with retries.
-* @param[out] temperature Reference to store the successfully read temperature (°C).
-* @param[out] humidity Reference to store the successfully read humidity (%).
-* @return True if both values were read successfully within retries, False otherwise.
-*/
+ * @brief Reads temperature and humidity from the DHT22 sensor, attempting multiple times if necessary.
+ * Calls `dhtSensor.readTemperature()` and `dhtSensor.readHumidity()` up to
+ * `SENSOR_READ_RETRIES` times with a delay between attempts, until *both* readings
+ * are valid (not NaN - Not a Number).
+ * @param[out] temperature Reference to a float variable where the successfully read temperature (in degrees Celsius) will be stored. Initialized to NAN on entry.
+ * @param[out] humidity Reference to a float variable where the successfully read relative humidity (in %) will be stored. Initialized to NAN on entry.
+ * @return `true` if both temperature and humidity were read successfully as valid numbers within the allowed retries.
+ * `false` otherwise.
+ */
 bool readDHTSensorWithRetry(float &temperature, float &humidity) {
-  temperature = NAN; // Ensure initial invalid state
-  humidity = NAN;    // Ensure initial invalid state
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.print("Reading DHT22 sensor");
-  #endif
-  for (int i = 0; i < SENSOR_READ_RETRIES; i++) {
-      temperature = dhtSensor.readTemperature();
-      humidity = dhtSensor.readHumidity();
-      // Check if both readings are valid numbers
-      if (!isnan(temperature) && !isnan(humidity)) {
-          #ifdef ENABLE_DEBUG_SERIAL
-             Serial.println(" OK (" + String(temperature) + "C, " + String(humidity) + "%)");
-          #endif
-          return true; // Success
-      }
-       #ifdef ENABLE_DEBUG_SERIAL
-        Serial.print(".");
-      #endif
-      delay(1000); // Wait longer for DHT retry
-  }
-   #ifdef ENABLE_DEBUG_SERIAL
-     Serial.println(" FAILED after retries.");
-   #endif
-  return false; // Failed after all retries
+    temperature = NAN; // Initialize output parameter to Not-a-Number (invalid state).
+    humidity = NAN;    // Initialize output parameter to Not-a-Number (invalid state).
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.print("  Reading temp/humidity sensor (DHT22)...");
+    #endif
+    for (int i = 0; i < SENSOR_READ_RETRIES; ++i) {
+        temperature = dhtSensor.readTemperature(); // Attempt to read temperature.
+        // Short delay between temp and humidity reads might sometimes help DHT sensors.
+        delay(100);
+        humidity = dhtSensor.readHumidity();       // Attempt to read humidity.
+
+        // Check if both readings are valid numbers (isnan() checks for Not-a-Number).
+        if (!isnan(temperature) && !isnan(humidity)) {
+            #ifdef ENABLE_DEBUG_SERIAL
+                // Print results with 2 decimal places for temp, 1 for humidity.
+                Serial.println(" OK (Temp: " + String(temperature, 2) + " C, Hum: " + String(humidity, 1) + " %)");
+            #endif
+            return true; // Both readings are valid, success.
+        }
+        // If one or both readings failed (are NaN)...
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.print("."); // Print dot to indicate retry attempt
+        #endif
+        // DHT sensors can be slow; wait longer between retries compared to I2C sensors.
+        delay(1000); // Wait 1 second before the next attempt. (Adjust if needed based on sensor behavior)
+    }
+    // If loop completes without returning true, all retries failed.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(" FAILED after " + String(SENSOR_READ_RETRIES) + " retries.");
+    #endif
+    return false; // Indicate failure after all retries.
 }
 
+
 /**
-* @brief Sends the collected environmental data to the server.
-* Handles setting LED state and logging for the send operation.
-* @param lightLevel The light level value to send.
-* @param temperature The temperature value to send.
-* @param humidity The humidity value to send.
-* @return True if the data was sent successfully (HTTP 2xx), False otherwise.
-*/
+ * @brief Sends the collected environmental data (light, temp, hum) to the configured server endpoint.
+ * Uses the `EnvironmentDataJSON` utility class to format the data as JSON and send it
+ * via HTTP POST. Manages LED status updates for the sending process (SENDING_DATA, ERROR_SEND).
+ * Logs success or failure status (if debug enabled).
+ * @param lightLevel The light level value (float, lux) to send.
+ * @param temperature The temperature value (float, degrees Celsius) to send.
+ * @param humidity The relative humidity value (float, %) to send.
+ * @return `true` if the data was sent successfully (server returned HTTP 2xx).
+ * `false` otherwise (HTTP request failed or server returned an error).
+ */
 bool sendEnvironmentDataToServer(float lightLevel, float temperature, float humidity) {
-  led.setState(SENDING_DATA); // Set LED to sending status
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Sending environmental data via HTTP POST to " + config.api_env + "...");
-  #endif
+    led.setState(SENDING_DATA); // Set LED to indicate data transmission phase.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("  Sending environmental data via HTTP POST...");
+        Serial.println("  Target URL: " + config.api_env);
+    #endif
 
-  // Use configuration value for API URL
-  bool sendSuccess = EnvironmentDataJSON::IOEnvironmentData(
-      config.api_env, lightLevel, temperature, humidity
-  );
-  delay(1000); // Short delay after sending attempt
+    // Call the static method from EnvironmentDataJSON utility class.
+    // Use the API endpoint URL loaded from the configuration.
+    bool sendSuccess = EnvironmentDataJSON::IOEnvironmentData(
+        config.api_env, // API endpoint URL from config
+        lightLevel,
+        temperature,
+        humidity
+    );
 
-  if (!sendSuccess) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("HTTP POST for environmental data failed.");
-      #endif
-      led.setState(ERROR_SEND); // Set LED to send error
-      delay(3000); // Show error
-      // ErrorLogger::sendLog(String(API_LOGGING), "ENV_SEND_FAIL", "Environment data send failed"); // Currently commented out
-      return false; // Indicate failure
-  }
+    delay(1000); // Short delay after the sending attempt (optional).
 
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Environmental data HTTP POST successful.");
-  #endif
-  // Optionally set LED back to a 'processing' state or leave as SENDING for now
-  // led.setState(TAKING_DATA); // Or ALL_OK briefly? Depends on flow.
-  return true; // Indicate success
+    // Check the result of the sending operation.
+    if (!sendSuccess) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("  Error: HTTP POST request for environmental data failed.");
+            // Specific errors might be logged within EnvironmentDataJSON if debug enabled there.
+        #endif
+        led.setState(ERROR_SEND); // Set LED to indicate a sending/communication error.
+        delay(3000);              // Show the error state briefly.
+        // Optional: Log the error to a remote logging service if implemented.
+        // ErrorLogger::sendLog(String(API_LOGGING), "ENV_SEND_FAIL", "Environment data send failed");
+        return false; // Indicate sending failure.
+    }
+
+    // If sending was successful.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("  Environmental data sent successfully via HTTP POST.");
+    #endif
+    // Optionally set LED back to a neutral state briefly before the next task.
+    // led.setState(ALL_OK); delay(500);
+    return true; // Indicate sending success.
 }
 
-// --- Image Capture Helper Function Implementations ---
+
+// =========================================================================
+// ===              IMAGE CAPTURE HELPER IMPLEMENTATIONS               ===
+// =========================================================================
 
 /**
- * @brief Reads a frame from the thermal sensor, allocates memory, and copies the data.
- * @param[out] thermalDataBuffer Pointer to a float pointer, will be allocated and filled.
- * @return True on success, False on failure (read, alloc, or copy).
+ * @brief Reads a frame from the MLX90640 thermal sensor, allocates a new buffer
+ * in PSRAM (if available) or heap, and copies the thermal data into it.
+ * @param[out] thermalDataBuffer Pointer to a `float*` variable in the caller. On success,
+ * this variable will be updated to point to the newly allocated buffer containing the copied thermal data (768 floats). Set to `nullptr` on failure.
+ * @return `true` if the thermal frame was read, memory was allocated, and data was copied successfully.
+ * `false` otherwise (read failure, allocation failure).
  */
 bool captureAndCopyThermalData(float** thermalDataBuffer) {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Reading thermal frame...");
-  #endif
-  if (!thermalSensor.readFrame()) {
-     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("Failed to read thermal frame.");
-     #endif
-     *thermalDataBuffer = nullptr; // Ensure null on failure
-     return false;
-  }
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("  Reading thermal camera frame (MLX90640)...");
+    #endif
+    *thermalDataBuffer = nullptr; // Ensure output pointer is null initially.
 
-  float* rawThermalData = thermalSensor.getThermalData();
-  if (rawThermalData == nullptr) {
-     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("Failed to get thermal data pointer (null).");
-     #endif
-     *thermalDataBuffer = nullptr;
-     return false;
-  }
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Thermal frame read OK. Allocating buffer...");
-  #endif
+    // Attempt to read a frame from the thermal sensor into its internal buffer.
+    if (!thermalSensor.readFrame()) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("  Error: Failed to read thermal frame from MLX90640 sensor.");
+        #endif
+        return false; // Read failure.
+    }
 
-  // Allocate memory for the copy
-  const size_t thermalSize = 32 * 24 * sizeof(float);
-  #if CONFIG_SPIRAM_SUPPORT || CONFIG_ESP32_SPIRAM_SUPPORT
-    *thermalDataBuffer = (float*)ps_malloc(thermalSize);
-  #else
-    *thermalDataBuffer = (float*)malloc(thermalSize);
-  #endif
+    // Get a pointer to the sensor's internal buffer containing the latest frame data.
+    float* rawThermalData = thermalSensor.getThermalData();
+    if (rawThermalData == nullptr) {
+        // This shouldn't happen if readFrame() succeeded, but check just in case.
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("  Error: Failed to get thermal data pointer from sensor (pointer is null).");
+        #endif
+        return false; // Failed to get pointer.
+    }
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("  Thermal frame read OK. Allocating buffer for copy...");
+    #endif
 
-  if (*thermalDataBuffer == nullptr) {
-     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("!!! Failed to allocate memory for thermal data copy !!!");
-     #endif
-     // ErrorLogger::sendLog(String(API_LOGGING), "MALLOC_FAIL", "Thermal data malloc failed");
-     return false;
-  }
+    // Calculate the required size for the buffer (768 float values).
+    const size_t thermalDataSizeInBytes = 32 * 24 * sizeof(float);
 
-  // Copy data to the newly allocated buffer
-  memcpy(*thermalDataBuffer, rawThermalData, thermalSize);
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Thermal data buffer allocated and copied.");
-  #endif
-  return true;
+    // Allocate memory for our copy of the thermal data.
+    // Prioritize PSRAM if available using ps_malloc for potentially large data.
+    // Fallback to standard malloc if PSRAM is not enabled/available.
+    #if CONFIG_SPIRAM_SUPPORT || CONFIG_ESP32_SPIRAM_SUPPORT // Check if PSRAM support is compiled in
+        *thermalDataBuffer = (float*)ps_malloc(thermalDataSizeInBytes);
+        #ifdef ENABLE_DEBUG_SERIAL
+            // Serial.println("  Attempting allocation in PSRAM.");
+        #endif
+    #else
+        *thermalDataBuffer = (float*)malloc(thermalDataSizeInBytes);
+        #ifdef ENABLE_DEBUG_SERIAL
+            // Serial.println("  Attempting allocation in standard heap (PSRAM not enabled/available).");
+        #endif
+    #endif
+
+    // Check if memory allocation was successful.
+    if (*thermalDataBuffer == nullptr) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("  CRITICAL ERROR: Failed to allocate %d bytes for thermal data copy!\n", thermalDataSizeInBytes);
+        #endif
+        // Optional: Log this critical memory allocation failure.
+        // ErrorLogger::sendLog(String(API_LOGGING), "MALLOC_FAIL", "Thermal data buffer allocation failed");
+        return false; // Allocation failure.
+    }
+
+    // Allocation succeeded, now copy the data from the sensor's internal buffer
+    // to our newly allocated buffer.
+    memcpy(*thermalDataBuffer, rawThermalData, thermalDataSizeInBytes);
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("  Thermal data buffer allocated and frame data copied successfully.");
+    #endif
+    return true; // Indicate success.
 }
 
 /**
-* @brief Captures a JPEG image using the camera.
-* The camera library allocates the buffer.
-* @param[out] jpegImageBuffer Pointer to a uint8_t pointer, set to the allocated buffer.
-* @param[out] jpegLength Reference set to the size of the captured image.
-* @return True on success, False on failure.
-*/
+ * @brief Captures a JPEG image using the OV2640 camera sensor.
+ * Calls the `camera.captureJPEG()` method, which handles buffer allocation
+ * (in PSRAM) internally. The allocated buffer's address and size are returned
+ * via the output parameters.
+ * @param[out] jpegImageBuffer Pointer to a `uint8_t*` variable in the caller. On success,
+ * this will be updated to point to the buffer allocated by the camera driver containing the JPEG data. Set to `nullptr` on failure.
+ * @param[out] jpegLength Reference to a `size_t` variable in the caller. On success,
+ * this will be updated with the size (in bytes) of the captured JPEG image. Set to 0 on failure.
+ * @return `true` if the JPEG image was captured and the buffer allocated successfully.
+ * `false` otherwise (capture failed or allocation failed).
+ */
 bool captureVisualJPEG(uint8_t** jpegImageBuffer, size_t& jpegLength) {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Capturing JPEG image...");
-  #endif
-  // captureJPEG allocates memory; caller of captureImages is responsible for freeing jpegImageBuffer
-  *jpegImageBuffer = camera.captureJPEG(jpegLength);
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("  Capturing visual JPEG image (OV2640)...");
+    #endif
+    // Ensure output parameters are reset before capture attempt.
+    *jpegImageBuffer = nullptr;
+    jpegLength = 0;
 
-  if (*jpegImageBuffer == nullptr || jpegLength == 0) {
-     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("!!! Failed to capture JPEG image or allocation failed !!!");
-     #endif
-     // ErrorLogger::sendLog(String(API_LOGGING), "JPEG_CAPTURE_FAIL", "JPEG capture failed");
-     return false;
-  }
+    // Call the camera wrapper's capture function.
+    // This function internally calls esp_camera_fb_get(), ps_malloc(), memcpy(), esp_camera_fb_return().
+    // It returns the pointer to the newly allocated buffer containing the JPEG data.
+    *jpegImageBuffer = camera.captureJPEG(jpegLength);
 
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.printf("JPEG Image captured successfully (%d bytes).\n", jpegLength);
-  #endif
-  return true;
+    // Check if the capture and allocation were successful.
+    // captureJPEG returns nullptr on failure, and jpegLength should be 0.
+    if (*jpegImageBuffer == nullptr || jpegLength == 0) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("  Error: Failed to capture JPEG image or memory allocation failed within camera driver/wrapper.");
+        #endif
+        // Optional: Log this failure.
+        // ErrorLogger::sendLog(String(API_LOGGING), "JPEG_CAPTURE_FAIL", "JPEG capture or buffer allocation failed");
+        return false; // Indicate failure.
+    }
+
+    // If capture succeeded.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.printf("  JPEG Image captured successfully. Size: %d bytes.\n", jpegLength);
+    #endif
+    return true; // Indicate success.
 }
