@@ -20,29 +20,28 @@
  *
  * As this class only contains a static method, you don't need to instantiate it.
  * Call the method directly using the class name scope resolution operator (::).
- * Example: `EnvironmentDataJSON::IOEnvironmentData(...)`
  */
 class EnvironmentDataJSON {
 public:
     /**
      * @brief Constructs a JSON payload and sends environmental data to an API via HTTP POST.
      *
-     * This static method takes environmental sensor readings, formats them into a JSON object
-     * with the structure `{"light": value, "temperature": value, "humidity": value}`,
-     * and then sends this JSON payload as the body of an HTTP POST request to the
-     * specified API URL.
+     * This static method takes environmental sensor readings, formats them into a JSON object:
+     * `{"light": value, "temperature": value, "humidity": value}`,
+     * and sends this JSON payload as the body of an HTTP POST request to the
+     * specified API URL, including an authorization token.
      *
-     * @param apiUrl The complete URL (String) of the API endpoint that will receive the POST request.
-     * Example: "https://api.example.com/data"
-     * @param lightLevel The ambient light level reading (float, e.g., in lux).
-     * @param temperature The temperature reading (float, e.g., in Celsius).
-     * @param humidity The relative humidity reading (float, e.g., in percentage).
-     * @return `true` if the HTTP POST request was sent successfully AND the server responded
-     * with a success status code (HTTP 200-299). Returns `false` if the connection
-     * failed, the request failed to send, or the server responded with an error code.
+     * @param fullEnvDataUrl The complete URL (String) of the API endpoint for environmental data.
+     * @param accessToken The access token (String) for `Authorization: Device <token>` header.
+     * @param lightLevel The ambient light level reading (float).
+     * @param temperature The temperature reading (float).
+     * @param humidity The relative humidity reading (float).
+     * @return The HTTP status code returned by the server. Returns a negative value
+     * if a client-side error occurred (e.g., connection failure, HTTPClient error).
      */
-    static bool IOEnvironmentData(
-        const String& apiUrl,
+    static int IOEnvironmentData( // Return type changed to int
+        const String& fullEnvDataUrl,
+        const String& accessToken,
         float lightLevel,
         float temperature,
         float humidity

@@ -1,89 +1,117 @@
 /**
  * @file MultipartDataSender.cpp
- * @brief Implements the MultipartDataSender utility class for sending combined thermal (JSON) and image (JPEG) data via HTTP POST.
+ * @brief Implements the MultipartDataSender utility class methods.
  */
 #include "MultipartDataSender.h"
 #include <ArduinoJson.h> // For creating the JSON part
 #include <vector>        // Using std::vector to dynamically build the byte payload
 #include <esp_random.h>  // For generating a random boundary component
+#include <math.h>        // For INFINITY, NAN, isnan
+#include <WiFi.h>        // For WiFi.status() check
 
-// Define ENABLE_DEBUG_SERIAL in your build flags or main sketch to enable Serial prints
-// #define ENABLE_DEBUG_SERIAL
+#define CAPTURE_DATA_HTTP_REQUEST_TIMEOUT 20000
 
-/**
- * @brief Sends thermal data and a JPEG image via HTTP POST using multipart/form-data encoding.
- * This is the main public static method that orchestrates the process.
- */
-/* static */ bool MultipartDataSender::IOThermalAndImageData(
-    const String& apiUrl,
+// --- Public Static Methods ---
+
+/* static */ int MultipartDataSender::IOThermalAndImageData(
+    const String& fullCaptureDataUrl,
+    const String& accessToken,
     float* thermalData,
     uint8_t* jpegImage,
     size_t jpegLength
 ) {
     // --- Step 1: Validate Input Data ---
+    if (fullCaptureDataUrl.isEmpty()) {
+        #ifdef ENABLE_DEBUG_SERIAL
+          Serial.println(F("[MultipartSender Error] Invalid input: Missing fullCaptureDataUrl."));
+        #endif
+        return -11; // Custom client error
+    }
     if (thermalData == nullptr || jpegImage == nullptr || jpegLength == 0) {
         #ifdef ENABLE_DEBUG_SERIAL
-          Serial.println("[MultipartSender Error] Invalid input: Null pointer or zero length image provided.");
+          Serial.println(F("[MultipartSender Error] Invalid input: Null pointer or zero length image/thermal data."));
         #endif
-        return false;
+        return -12; // Custom client error
     }
+     if (WiFi.status() != WL_CONNECTED) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[MultipartSender Error] Skipped sending: No WiFi connection."));
+        #endif
+        return -13; // Custom client error: no WiFi
+    }
+
 
     // --- Step 2: Create JSON Payload for Thermal Data ---
     String thermalJsonString = createThermalJson(thermalData);
-    if (thermalJsonString.length() == 0) {
-        // Error should have been logged within createThermalJson if ENABLE_DEBUG_SERIAL is defined
-        return false; // Exit if JSON creation failed
+    if (thermalJsonString.isEmpty()) { // Changed from length() == 0 for clarity
+        #ifdef ENABLE_DEBUG_SERIAL
+          Serial.println(F("[MultipartSender Error] Failed to create thermal JSON."));
+        #endif
+        return -14; // Custom client error: JSON creation failed
     }
 
     // --- Step 3: Generate a Unique Boundary String ---
-    // Using esp_random() for a reasonably unique boundary part.
-    String boundary = "----WebKitFormBoundaryESP32" + String(esp_random());
+    String boundary = "----WebKitFormBoundaryESP32-" + String(esp_random(), HEX) + String(esp_random(), HEX);
+
 
     // --- Step 4: Build the Complete Multipart Payload ---
     std::vector<uint8_t> payload = buildMultipartPayload(boundary, thermalJsonString, jpegImage, jpegLength);
     if (payload.empty()) {
-        // Error likely related to memory allocation within buildMultipartPayload
         #ifdef ENABLE_DEBUG_SERIAL
-          Serial.println("[MultipartSender Error] Failed to build multipart payload (payload vector is empty).");
+          Serial.println(F("[MultipartSender Error] Failed to build multipart payload."));
         #endif
-        return false; // Exit if payload building failed
+        return -15; // Custom client error: Payload build failed
     }
 
-    // --- Step 5: Perform the HTTP POST Request with Retries ---
-    return performHttpPost(apiUrl, boundary, payload);
+    // --- Step 5: Perform the HTTP POST Request ---
+    return performHttpPost(fullCaptureDataUrl, accessToken, boundary, payload);
 }
 
-// --- Helper Function Implementations ---
+// --- Private Static Helper Methods ---
 
 /**
- * @brief Creates a JSON object string `{"temperatures": [...]}` from the thermal data array.
+ * @brief Creates a JSON object string including raw temperatures, max, min, and average.
  */
 /* static */ String MultipartDataSender::createThermalJson(float* thermalData) {
-    // Using dynamic JsonDocument. Capacity calculation is an estimate.
-    // If memory is extremely tight or JSON structure is fixed, StaticJsonDocument might be considered.
-    // Required capacity: JSON object framing + key "temperatures" + JSON array framing + 768 floats (comma-separated)
-    // Rough estimate: JSON_OBJECT_SIZE(1) + 15 ("temperatures":[]) + JSON_ARRAY_SIZE(768) + 768 * (avg_float_len + 1_comma)
-    // A simpler large-enough estimate:
-    const size_t capacity = JSON_OBJECT_SIZE(1) + JSON_ARRAY_SIZE(768) + 10000; // Generous estimate for 768 floats
+    // Calculate statistics first using helper methods
+    float maxTemp = calculateMaxTemperature(thermalData);
+    float minTemp = calculateMinTemperature(thermalData);
+    float avgTemp = calculateAverageTemperature(thermalData);
+
+    // Check for calculation errors (e.g., all NaN input)
+    if (isinf(maxTemp) || isinf(minTemp) || isnan(avgTemp)) {
+         #ifdef ENABLE_DEBUG_SERIAL
+          Serial.println("[MultipartSender Warning] Thermal stats calculation resulted in Inf/NaN, likely due to invalid input data.");
+         #endif
+         // Decide how to handle this - sending default values or empty string?
+         // Returning empty string to indicate failure upstream.
+         return "";
+    }
+
+    // Estimate JSON capacity
+    const size_t capacity = JSON_OBJECT_SIZE(4) + JSON_ARRAY_SIZE(THERMAL_PIXELS) + 10200; // Adjusted estimate
     JsonDocument doc; // Defaults to dynamic allocation
 
-    // Create the root object and add the "temperatures" array
+    // --- Populate JSON ---
+    doc["max_temp"] = maxTemp;
+    doc["min_temp"] = minTemp;
+    doc["avg_temp"] = avgTemp;
+
+    // Create and populate the "temperatures" array
     JsonArray tempArray = doc["temperatures"].to<JsonArray>();
     if (tempArray.isNull()) {
-        // This usually happens if memory allocation for the JsonDocument fails.
         #ifdef ENABLE_DEBUG_SERIAL
           Serial.println("[MultipartSender Error] Failed to create JSON array for thermal data (isNull). Check memory.");
         #endif
         return ""; // Return empty string on failure
     }
 
-    // Populate the JSON array with temperature values
-    const int totalPixels = 32 * 24;
-    for(int i = 0; i < totalPixels; ++i) {
-        // Add temperature value. ArduinoJson handles float formatting.
-        // Consider adding checks here if thermalData can contain NaN or invalid values:
-        // if (isnan(thermalData[i])) { tempArray.add(nullptr); } else { tempArray.add(thermalData[i]); }
-        tempArray.add(thermalData[i]);
+    for(int i = 0; i < THERMAL_PIXELS; ++i) {
+        if (isnan(thermalData[i])) {
+             tempArray.add(nullptr); // Represent NaN as null in JSON
+        } else {
+             tempArray.add(thermalData[i]);
+        }
     }
 
     // Serialize the complete JSON document to a String
@@ -98,11 +126,65 @@
     }
 
     #ifdef ENABLE_DEBUG_SERIAL
-       // Serial.println("Generated Thermal JSON: " + jsonString); // Can be very long!
        Serial.printf("[MultipartSender] Generated Thermal JSON String Length: %d\n", jsonString.length());
+       Serial.printf("  Calculated Stats: Max=%.2f, Min=%.2f, Avg=%.2f\n", maxTemp, minTemp, avgTemp);
     #endif
     return jsonString;
 }
+
+/**
+ * @brief Calculates the maximum temperature from the thermal data array.
+ */
+/* static */ float MultipartDataSender::calculateMaxTemperature(float* thermalData) {
+    if (thermalData == nullptr) return -INFINITY; // Handle null input
+
+    float maxTemp = -INFINITY;
+    for (int i = 0; i < THERMAL_PIXELS; ++i) {
+        if (!isnan(thermalData[i]) && thermalData[i] > maxTemp) {
+            maxTemp = thermalData[i];
+        }
+    }
+    return maxTemp; // Returns -INFINITY if all were NaN or array was empty
+}
+
+/**
+ * @brief Calculates the minimum temperature from the thermal data array.
+ */
+/* static */ float MultipartDataSender::calculateMinTemperature(float* thermalData) {
+     if (thermalData == nullptr) return INFINITY; // Handle null input
+
+    float minTemp = INFINITY;
+    for (int i = 0; i < THERMAL_PIXELS; ++i) {
+        if (!isnan(thermalData[i]) && thermalData[i] < minTemp) {
+            minTemp = thermalData[i];
+        }
+    }
+    return minTemp; // Returns INFINITY if all were NaN or array was empty
+}
+
+/**
+ * @brief Calculates the average temperature from the thermal data array.
+ */
+/* static */ float MultipartDataSender::calculateAverageTemperature(float* thermalData) {
+    if (thermalData == nullptr) return NAN; // Handle null input
+
+    double sumTemp = 0.0;
+    int validPixelCount = 0;
+
+    for (int i = 0; i < THERMAL_PIXELS; ++i) {
+        if (!isnan(thermalData[i])) {
+            sumTemp += thermalData[i];
+            validPixelCount++;
+        }
+    }
+
+    if (validPixelCount > 0) {
+        return (float)(sumTemp / validPixelCount);
+    } else {
+        return NAN; // Return Not-a-Number if no valid pixels were found
+    }
+}
+
 
 /**
  * @brief Builds the complete multipart/form-data payload as a byte vector.
@@ -111,10 +193,8 @@
     const String& boundary, const String& thermalJson, uint8_t* jpegImage, size_t jpegLength
 ) {
     std::vector<uint8_t> payload;
+    size_t estimatedSize = thermalJson.length() + jpegLength + 512; // Estimate size
 
-    // Estimate required size to potentially avoid reallocations. Be generous.
-    // Size = Headers/Boundaries (~512 bytes) + JSON length + JPEG length
-    size_t estimatedSize = thermalJson.length() + jpegLength + 512;
     try {
         payload.reserve(estimatedSize);
     } catch (const std::bad_alloc& e) {
@@ -124,137 +204,103 @@
         return payload; // Return empty vector
     }
 
-    // Helper lambda to append String data efficiently to the byte vector
+    // Helper lambdas
     auto appendString = [&payload](const String& str) {
         payload.insert(payload.end(), str.c_str(), str.c_str() + str.length());
     };
-     // Helper lambda to append raw C-string data
     auto appendRaw = [&payload](const char* str) {
         payload.insert(payload.end(), str, str + strlen(str));
     };
 
     // --- Part 1: Thermal Data (JSON) ---
     appendString("--" + boundary + "\r\n");
-    appendRaw("Content-Disposition: form-data; name=\"thermal\"\r\n"); // Field name "thermal"
-    appendRaw("Content-Type: application/json\r\n\r\n"); // Specify JSON content type
-    appendString(thermalJson); // Append the JSON data
-    appendRaw("\r\n"); // End of part content
+    appendRaw("Content-Disposition: form-data; name=\"thermal\"\r\n");
+    appendRaw("Content-Type: application/json\r\n\r\n");
+    appendString(thermalJson);
+    appendRaw("\r\n");
 
     // --- Part 2: Image Data (JPEG) ---
     appendString("--" + boundary + "\r\n");
-    // Field name "image", filename "camera.jpg" (server might use this)
     appendRaw("Content-Disposition: form-data; name=\"image\"; filename=\"camera.jpg\"\r\n");
-    appendRaw("Content-Type: image/jpeg\r\n\r\n"); // Specify JPEG content type
-    // Append binary JPEG image data directly
+    appendRaw("Content-Type: image/jpeg\r\n\r\n");
     payload.insert(payload.end(), jpegImage, jpegImage + jpegLength);
-    appendRaw("\r\n"); // End of part content
+    appendRaw("\r\n");
 
     // --- Closing Boundary ---
-    appendString("--" + boundary + "--\r\n"); // Final boundary indicates end of message
+    appendString("--" + boundary + "--\r\n");
 
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.printf("[MultipartSender] Built multipart payload. Total size: %d bytes.\n", payload.size());
     #endif
 
-    return payload; // Return the fully constructed payload
+    return payload;
 }
 
 /**
  * @brief Performs the actual HTTP POST request with the multipart payload and retries.
  */
-/* static */ bool MultipartDataSender::performHttpPost(
-    const String& apiUrl, const String& boundary, const std::vector<uint8_t>& payload
+/* static */ int MultipartDataSender::performHttpPost(
+    const String& apiUrl,
+    const String& accessToken, // Added accessToken
+    const String& boundary,
+    const std::vector<uint8_t>& payload
 ) {
     HTTPClient http;
-    bool success = false;
-    const int maxRetries = 3; // Number of times to retry the POST operation on failure
+    int httpResponseCode = -16; // Default to a generic client error for this function
+    const int maxRetries = 2; // Reduced retries for data sending as an example, can be adjusted
 
     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("[MultipartSender] Initiating HTTP POST request to: " + apiUrl);
-      Serial.printf("  Payload Size: %d bytes\n", payload.size());
+      Serial.printf("[MultipartSender] Initiating HTTP POST request to: %s\n", apiUrl.c_str());
+      Serial.printf("  Payload Size: %d bytes\n", (int)payload.size());
     #endif
 
-    // Configure HTTP client. Use WiFiClient for HTTP, WiFiClientSecure for HTTPS.
-    // Note: begin() can fail if URL is invalid.
-    if (http.begin(apiUrl)) {
-
-        // --- Set Necessary HTTP Headers ---
-        // Content-Type is crucial for multipart requests, includes the boundary
+    if (http.begin(apiUrl)) { // For HTTP. For HTTPS, use WiFiClientSecure.
+        http.setTimeout(CAPTURE_DATA_HTTP_REQUEST_TIMEOUT);
         http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
-        // Content-Length is often required by servers
-        http.addHeader("Content-Length", String(payload.size()));
-        // Add any other required headers, e.g., Authorization for protected APIs
-        // http.addHeader("Authorization", "Bearer YOUR_AUTH_TOKEN");
 
-        int httpResponseCode = -1; // Initialize with an invalid code
+        if (!accessToken.isEmpty()) {
+            http.addHeader("Authorization", "Device " + accessToken);
+        } else {
+            #ifdef ENABLE_DEBUG_SERIAL
+              Serial.println(F("[MultipartSender] Warning: Sending capture data without an access token."));
+            #endif
+        }
 
-        // --- Attempt POST Request with Retries ---
         for (int retry = 0; retry < maxRetries; ++retry) {
             #ifdef ENABLE_DEBUG_SERIAL
               if (retry > 0) Serial.printf("  Retrying POST... (Attempt %d/%d)\n", retry + 1, maxRetries);
             #endif
 
-            // Perform the POST request sending the raw byte payload.
-            // Use const_cast as HTTPClient::POST expects uint8_t* but shouldn't modify it.
+            // Send the payload from the vector's data pointer and size
             httpResponseCode = http.POST(const_cast<uint8_t*>(payload.data()), payload.size());
 
-            if (httpResponseCode > 0) {
-                // Received a valid HTTP response code from the server (e.g., 200, 404, 500)
+            if (httpResponseCode > 0) { // Valid HTTP response received
                 #ifdef ENABLE_DEBUG_SERIAL
                   Serial.printf("  HTTP Response Code: %d\n", httpResponseCode);
+                  String responseBody = http.getString(); // Capture data endpoint often returns 204 No Content
+                  if (!responseBody.isEmpty()) Serial.println("  HTTP Response Body: " + responseBody);
                 #endif
-                // It's good practice to read the response body, even if not used,
-                // to properly clear the connection buffer.
-                String responseBody = http.getString();
+                // Ensure response body is consumed if not already read for debug
+                if (http.getSize() > 0) {
+                    http.getString();
+                }
+                break; // Exit retry loop on valid response
+            } else { // HTTP client error (e.g., connection refused, timeout before response)
                 #ifdef ENABLE_DEBUG_SERIAL
-                  // Avoid printing very large response bodies unless necessary
-                  if (responseBody.length() < 256) {
-                     Serial.println("  HTTP Response Body: " + responseBody);
-                  } else {
-                     Serial.printf("  HTTP Response Body: (Truncated - %d bytes)\n", responseBody.length());
-                  }
+                  Serial.printf("  HTTP POST failed (Attempt %d/%d), client error: %s (Code: %d)\n",
+                                retry + 1, maxRetries, http.errorToString(httpResponseCode).c_str(), httpResponseCode);
                 #endif
-                break; // Exit the retry loop as we got a definitive response from the server
-            } else {
-                // HTTP request itself failed (e.g., connection refused, timeout, DNS error)
-                // httpResponseCode will be negative or zero.
-                #ifdef ENABLE_DEBUG_SERIAL
-                  Serial.printf("  HTTP POST failed (Attempt %d/%d), client error: %s\n",
-                                retry + 1, maxRetries, http.errorToString(httpResponseCode).c_str());
-                #endif
-                // Wait a bit before retrying connection/send errors
-                delay( (retry + 1) * 500 ); // Increasing delay: 500ms, 1000ms, 1500ms
+                if (retry < maxRetries - 1) {
+                    delay( (retry + 1) * 1000 ); // Delay before retry (e.g., 1s, 2s)
+                }
             }
         } // End retry loop
-
-        // --- Check Final Response Code ---
-        // Evaluate success based *only* on the final HTTP response code received.
-        if (httpResponseCode >= 200 && httpResponseCode < 300) {
-            #ifdef ENABLE_DEBUG_SERIAL
-              Serial.println("[MultipartSender] Request successful (HTTP 2xx).");
-            #endif
-            success = true;
-        } else {
-             #ifdef ENABLE_DEBUG_SERIAL
-              if (httpResponseCode > 0) {
-                 Serial.printf("[MultipartSender Error] Request failed, server returned non-2xx status: %d\n", httpResponseCode);
-              } else {
-                 Serial.println("[MultipartSender Error] Request failed, no valid response received after retries.");
-              }
-            #endif
-             success = false;
-        }
-
-        // --- Clean up HTTP Connection ---
-        http.end();
-
+        http.end(); // Clean up connection
     } else {
-        // http.begin(apiUrl) failed. Likely an invalid URL or DNS issue.
         #ifdef ENABLE_DEBUG_SERIAL
-          Serial.println("[MultipartSender Error] Unable to begin HTTP connection to: " + apiUrl);
+          Serial.printf("[MultipartSender Error] Unable to begin HTTP connection to: %s\n", apiUrl.c_str());
         #endif
-        success = false;
+        httpResponseCode = -17; // Custom client error: HTTP begin failed
     }
-
-    return success; // Return the final success status
+    return httpResponseCode;
 }
