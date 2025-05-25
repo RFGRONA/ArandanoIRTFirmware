@@ -1,83 +1,105 @@
 /**
  * @file ErrorLogger.cpp
- * @brief Implements the ErrorLogger utility class for sending remote error logs.
- * @note This implementation relies on the ESP32 WiFi and HTTPClient libraries, ArduinoJson,
- * and requires WiFi to be connected for logs to be sent.
- * @note It also depends on a globally instantiated `api` object (from API.h/API.cpp)
- * to check backend status via `api.checkBackendStatus()` before attempting to send logs.
+ * @brief Implements the ErrorLogger utility class for sending remote logs.
  */
 #include "ErrorLogger.h"
-#include <ArduinoJson.h>    // For JSON formatting
-#include <HTTPClient.h>     // For making HTTP requests
-#include <WiFi.h>           // For checking WiFi status (WiFi.status())
-#include "API.h"            // Required for the global 'api' object instance
+#include <ArduinoJson.h> // For JSON formatting
+#include <HTTPClient.h>  // For making HTTP requests
+#include <WiFi.h>        // For checking WiFi status (though decision to send is external)
 
-// Global instance dependency: Assumes an 'api' object of class API is defined globally.
-extern API api; // Declaration that 'api' is defined elsewhere (usually in the main .ino or another .cpp)
-                // If 'API api;' is defined here instead, it creates a *new* instance just for this file,
-                // which might not be intended if 'api' should be shared across the project.
-                // Using 'extern' assumes it's defined once globally somewhere else.
-                // **If 'API api;' was intended to be defined here globally, keep it, but be aware of potential issues if API state needs to be shared.**
+// HTTP Timeout for log requests (milliseconds)
+#define LOG_HTTP_REQUEST_TIMEOUT 5000 // Shorter timeout for logs might be acceptable
 
 /**
- * @brief Static method implementation for sending structured error logs.
+ * @brief Static method implementation for sending structured log messages.
  */
-bool ErrorLogger::sendLog(const String& apiUrl, const String& errorSource, const String& errorMessage) {
+bool ErrorLogger::sendLog(const String& fullLogUrl, const String& accessToken, const char* logType, const String& logMessage) {
 
-    // Do NOT attempt to send logs if WiFi is not connected or if the backend check fails.
-    if (WiFi.status() != WL_CONNECTED || !api.checkBackendStatus()) {
-        // Optional: Log locally (Serial) that the remote log was skipped.
-        // Serial.println("[ErrorLogger] Skipped sending log: No WiFi or backend unavailable.");
+    // Basic validation of inputs
+    if (fullLogUrl.isEmpty() || logType == nullptr || logMessage.isEmpty()) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[ErrorLogger] Skipped sending log: Missing URL, logType, or message."));
+        #endif
         return false;
     }
 
-    // Create JSON document dynamically.
-    JsonDocument doc;
-    // Populate the JSON object with error source and message.
-    doc["source"] = errorSource;
-    doc["message"] = errorMessage;
-    // Note: Timestamp (e.g., using millis() or an RTC) is not included here,
-    // but could be added if needed: doc["timestamp"] = millis();
+    // Although the decision to call sendLog should consider WiFi, a check here is a safeguard.
+    if (WiFi.status() != WL_CONNECTED) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[ErrorLogger] Skipped sending log: No WiFi connection."));
+        #endif
+        return false;
+    }
+
+    // If no access token is provided, logs might fail if endpoint requires auth.
+    // For now, we proceed but log a warning if debug is enabled.
+    if (accessToken.isEmpty()) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[ErrorLogger] Warning: Sending log without an access token."));
+        #endif
+    }
+
+    // Create JSON document. DynamicJsonDocument is safer for varying message lengths.
+    // Adjust capacity as needed, but this should be enough for typical log messages.
+    JsonDocument doc; // Using dynamic allocation
+
+    // Populate the JSON object.
+    doc["logType"] = logType;
+    doc["logMessage"] = logMessage;
+    // logTimestamp is set by the backend as per specifications.
 
     // Serialize JSON document to a String.
-    String jsonString;
-    serializeJson(doc, jsonString);
+    String jsonPayload;
+    serializeJson(doc, jsonPayload);
 
-    // Configure and send the HTTP POST request.
+    if (jsonPayload.isEmpty()) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[ErrorLogger] Failed to serialize JSON payload for log."));
+        #endif
+        return false;
+    }
+
     HTTPClient http;
     bool success = false;
 
-    // Use a standard WiFiClient for HTTP connections.
-    // If apiUrl requires HTTPS, WiFiClientSecure must be used here, along with
-    // proper certificate handling (e.g., client.setCACert, client.setInsecure - not recommended).
-    WiFiClient client;
-    // Use the 'begin' version that takes a client instance, suitable for both HTTP/HTTPS.
-    if (http.begin(client, apiUrl)) { // Check if begin was successful
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.printf("[ErrorLogger] Attempting to send log. Type: %s, URL: %s\n", logType, fullLogUrl.c_str());
+        Serial.printf("[ErrorLogger] Payload: %s\n", jsonPayload.c_str()); // Potentially long
+    #endif
 
-        // Set the content type header to indicate JSON payload.
+    if (http.begin(fullLogUrl)) { // For HTTP. For HTTPS, use WiFiClientSecure.
+        http.setTimeout(LOG_HTTP_REQUEST_TIMEOUT);
         http.addHeader("Content-Type", "application/json");
-
-        // Perform the HTTP POST request.
-        int httpResponseCode = http.POST(jsonString);
-
-        // Check if the server responded with a success code (2xx range).
-        if (httpResponseCode >= 200 && httpResponseCode < 300) {
-            success = true;
-            // Optional: Log successful send: Serial.println("[ErrorLogger] Log sent successfully.");
-        } else {
-            success = false;
-            // Optional: Log failure details:
-            // Serial.printf("[ErrorLogger] Failed to send log. HTTP Response Code: %d\n", httpResponseCode);
-            // if(httpResponseCode > 0) { Serial.println("[ErrorLogger] Response Body: " + http.getString()); }
-            // else { Serial.printf("[ErrorLogger] HTTP Error: %s\n", http.errorToString(httpResponseCode).c_str()); }
+        if (!accessToken.isEmpty()) {
+            http.addHeader("Authorization", "Device " + accessToken);
         }
 
-        // Release HTTP resources.
-        http.end();
+        int httpResponseCode = http.POST(jsonPayload);
 
+        if (httpResponseCode >= 200 && httpResponseCode < 300) {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[ErrorLogger] Log sent successfully. HTTP Response: %d\n", httpResponseCode);
+                String responseBody = http.getString(); // Usually 204 No Content, so body might be empty.
+                if (!responseBody.isEmpty()) Serial.printf("[ErrorLogger] Response: %s\n", responseBody.c_str());
+            #endif
+            success = true;
+        } else {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[ErrorLogger] Failed to send log. HTTP Response Code: %d\n", httpResponseCode);
+                if(httpResponseCode > 0) {
+                    String errorResponse = http.getString();
+                    Serial.printf("[ErrorLogger] Server Error Response: %s\n", errorResponse.c_str());
+                } else {
+                    Serial.printf("[ErrorLogger] HTTP Client Error: %s\n", http.errorToString(httpResponseCode).c_str());
+                }
+            #endif
+            success = false;
+        }
+        http.end();
     } else {
-        // Failed to initialize the HTTP connection.
-        // Serial.printf("[ErrorLogger] HTTP connection failed for URL: %s\n", apiUrl.c_str());
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[ErrorLogger] HTTP connection failed for log URL: %s\n", fullLogUrl.c_str());
+        #endif
         success = false;
     }
 
