@@ -70,30 +70,6 @@ public:
      */
     float* getThermalData();
 
-    /**
-     * @brief Calculates the average temperature from all pixels in the last successfully read frame.
-     * Iterates through the internal `frame` buffer and computes the mean value.
-     * @return The average temperature in degrees Celsius ($^{\circ}C$). Returns calculation based on current buffer content.
-     * @note Ensure `readFrame()` was called successfully before relying on this value.
-     */
-    float getAverageTemperature();
-
-    /**
-     * @brief Finds the maximum temperature among all pixels in the last successfully read frame.
-     * Iterates through the internal `frame` buffer to find the highest temperature value.
-     * @return The maximum temperature found in degrees Celsius ($^{\circ}C$). Returns calculation based on current buffer content.
-     * @note Ensure `readFrame()` was called successfully before relying on this value.
-     */
-    float getMaxTemperature();
-
-    /**
-     * @brief Finds the minimum temperature among all pixels in the last successfully read frame.
-     * Iterates through the internal `frame` buffer to find the lowest temperature value.
-     * @return The minimum temperature found in degrees Celsius ($^{\circ}C$). Returns calculation based on current buffer content.
-     * @note Ensure `readFrame()` was called successfully before relying on this value.
-     */
-    float getMinTemperature();
-
 private:
     Adafruit_MLX90640 mlx;    ///< @brief Instance of the underlying Adafruit MLX90640 library object.
     float frame[32 * 24];     ///< @brief Internal buffer to store 768 pixel temperatures (degrees Celsius, $^{\circ}C$) from the last frame read.
