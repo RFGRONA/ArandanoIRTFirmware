@@ -4,196 +4,335 @@
  */
 #include "API.h"
 
+// HTTP Timeout (milliseconds)
+#define HTTP_REQUEST_TIMEOUT 10000
+
 /**
  * @brief Constructor implementation.
  */
-API::API() {
-    // Initialize the Preferences library within the "activation" namespace.
-    // The second argument 'false' means read/write mode.
-    _preferences.begin("activation", false);
-    // Load the previously saved authentication token from NVS, if it exists.
-    // If not found, initialize _authToken to an empty string.
-    _authToken = _preferences.getString(PREF_AUTH_TOKEN, "");
+API::API(const String& base_url, const String& activate_path, const String& auth_path, const String& refresh_path) :
+    _apiBaseUrl(base_url),
+    _apiActivatePath(activate_path),
+    _apiAuthPath(auth_path),
+    _apiRefreshTokenPath(refresh_path),
+    _dataCollectionTimeMinutes(DEFAULT_DATA_COLLECTION_MINUTES), // Initialize with default
+    _activatedFlag(false) { // Default to not activated
+    _preferences.begin(NVS_NAMESPACE, false); // false for read/write mode
+    _loadPersistentData();
 }
 
 /**
- * @brief Saves the activation state to NVS.
+ * @brief Destructor implementation.
  */
-void API::saveActivationState(const char* state) {
-    _preferences.putString(PREF_ACTIVATION_STATE, state);
+API::~API() {
+    _preferences.end();
 }
 
 /**
- * @brief Saves the authentication token to NVS and updates the in-memory variable.
+ * @brief Loads all persistent data items from NVS into member variables.
  */
-void API::saveAuthToken(const String &token) {
-    _preferences.putString(PREF_AUTH_TOKEN, token);
-    _authToken = token; // Keep the in-memory copy synchronized
-}
+void API::_loadPersistentData() {
+    _accessToken = _preferences.getString(KEY_ACCESS_TOKEN, "");
+    _refreshToken = _preferences.getString(KEY_REFRESH_TOKEN, "");
+    _dataCollectionTimeMinutes = _preferences.getInt(KEY_DATA_COLLECTION_TIME, DEFAULT_DATA_COLLECTION_MINUTES);
+    _activatedFlag = _preferences.getBool(KEY_IS_ACTIVATED, false);
 
-/**
- * @brief Implementation of the device activation logic.
- */
-bool API::activateDevice() {
-    int attempt = 0;
-    int httpResponseCode = 0;
-    bool activated = false;
-
-    // Retry the activation process up to HTTP_MAX_RETRIES times
-    while (attempt < HTTP_MAX_RETRIES && !activated) {
-        HTTPClient http;
-        http.setTimeout(HTTP_TIMEOUT);
-        // @note Ensure the root CA certificate for the server is available
-        //       to the ESP32's WiFiClientSecure layer if using HTTPS.
-        //       This might involve http.begin(url, root_ca_certificate);
-        http.begin(ACTIVATION_ENDPOINT);
-        http.addHeader("Content-Type", "application/json");
-
-        // Construct JSON payload with the activation JWT
-        JsonDocument doc; // Use JsonDocument for ESP32 ArduinoJson v6+
-        doc["activation_code"] = ACTIVATION_JWT;
-        String payload;
-        serializeJson(doc, payload);
-
-        // Perform the POST request
-        httpResponseCode = http.POST(payload);
-        http.end(); // Release resources
-
-        if (httpResponseCode == 200) {
-            // Activation successful: save state and exit loop
-            saveActivationState(STATE_ACTIVATED);
-            activated = true;
-        } else {
-            // Activation failed on this attempt
-            attempt++;
-            // Optional: Log the error code: Serial.printf("[API] Activation failed, HTTP code: %d\n", httpResponseCode);
-            delay(500); // Short delay before retrying
-        }
+    // Ensure _dataCollectionTimeMinutes has a sane default if NVS was empty or had 0
+    if (_dataCollectionTimeMinutes <= 0) {
+        _dataCollectionTimeMinutes = DEFAULT_DATA_COLLECTION_MINUTES;
     }
-
-    // If activation failed after all retries
-    if (!activated) {
-        // Indicate error state visually
-        _led.setState(ERROR_AUTH); // Assuming ERROR_AUTH is defined in LEDStatus.h
-        delay(5000); // Show error state for a few seconds
-        _led.setState(OFF);  // Turn LED off
-        // Save non-activated state to NVS
-        saveActivationState(STATE_NO_ACTIVATED);
-        // Optional: Log the final failure: Serial.println("[API] Device activation failed permanently.");
-    }
-
-    return activated;
 }
 
-/**
- * @brief Implementation of the activation check and token retrieval logic.
- */
-bool API::checkActivation() {
-    int attempt = 0;
-    int httpResponseCode = 0;
-    bool active = false;
-
-    // Retry the check process up to HTTP_MAX_RETRIES times
-    while (attempt < HTTP_MAX_RETRIES && !active) {
-        HTTPClient http;
-        http.setTimeout(HTTP_TIMEOUT);
-
-        // Construct the URL by appending the device ID
-        String url = String(CHECK_ACTIVATION_ENDPOINT) + DEVICE_ID;
-        // @note As above, ensure HTTPS certificate handling if needed.
-        http.begin(url);
-        // Add the current auth token (or activation JWT initially?) to the Authorization header
-        // @note The current code uses ACTIVATION_JWT. Depending on the backend API design,
-        //       this might need to be `_authToken` after the first successful checkActivation
-        //       or if activation and subsequent checks use different tokens. Revisit this logic.
-        http.addHeader("Authorization", "Bearer " + String(ACTIVATION_JWT)); // Assuming Bearer token auth
-
-        // Perform the GET request
-        httpResponseCode = http.GET();
-
-        if (httpResponseCode == 200) {
-            // Got a successful response, try to parse the JSON payload
-            String response = http.getString();
-            http.end(); // End connection now that we have the response
-
-            JsonDocument responseDoc;
-            DeserializationError error = deserializeJson(responseDoc, response);
-
-            if (!error) {
-                // Successfully parsed JSON, look for the token
-                const char* newTokenCStr = responseDoc["token"]; // Assuming the key is "token"
-                if (newTokenCStr != nullptr) {
-                    String receivedToken(newTokenCStr);
-                    // Check if the received token is different from the current one
-                    if (receivedToken != _authToken) {
-                         // Optional: Log token update: Serial.println("[API] Auth token updated.");
-                        saveAuthToken(receivedToken); // Save new token to NVS and memory
-                    } else {
-                        // Optional: Log token unchanged: Serial.println("[API] Auth token verified, no change.");
-                    }
-                    active = true; // Mark as active and exit loop
-                    break; // Exit the while loop successfully
-                } else {
-                     // Optional: Log token missing: Serial.println("[API] Token key missing in JSON response.");
-                }
-            } else {
-                // Optional: Log JSON error: Serial.printf("[API] JSON deserialization failed: %s\n", error.c_str());
-            }
-        } else {
-            // HTTP request failed
-            http.end(); // Ensure connection is closed on error too
-            // Optional: Log HTTP error: Serial.printf("[API] Check activation failed, HTTP code: %d\n", httpResponseCode);
-        }
-
-        // Increment attempt counter and wait before retrying
-        attempt++;
-        delay(500);
-    }
-
-    // If the check failed after all retries
-    if (!active) {
-        // Indicate error state visually
-        _led.setState(ERROR_AUTH);
-        delay(5000); // Show error state
-        _led.setState(OFF);
-        // Save non-activated state as the check failed
-        saveActivationState(STATE_NO_ACTIVATED);
-        // Optional: Log final failure: Serial.println("[API] Device activation check failed permanently.");
-    }
-
-    return active;
+// --- NVS Save Methods ---
+void API::_saveAccessToken(const String& token) {
+    _accessToken = token;
+    _preferences.putString(KEY_ACCESS_TOKEN, _accessToken);
 }
 
+void API::_saveRefreshToken(const String& token) {
+    _refreshToken = token;
+    _preferences.putString(KEY_REFRESH_TOKEN, _refreshToken);
+}
+
+void API::_saveDataCollectionTime(int minutes) {
+    if (minutes <= 0) minutes = DEFAULT_DATA_COLLECTION_MINUTES; // Ensure sane value
+    _dataCollectionTimeMinutes = minutes;
+    _preferences.putInt(KEY_DATA_COLLECTION_TIME, _dataCollectionTimeMinutes);
+}
+
+void API::_saveActivationStatus(bool activated) {
+    _activatedFlag = activated;
+    _preferences.putBool(KEY_IS_ACTIVATED, _activatedFlag);
+}
+
+// --- Public Getter Methods ---
+bool API::isActivated() const {
+    return _activatedFlag;
+}
+
+String API::getAccessToken() const {
+    return _accessToken;
+}
+
+String API::getBaseApiUrl() const {
+    return _apiBaseUrl;
+}
+
+int API::getDataCollectionTimeMinutes() const {
+    return _dataCollectionTimeMinutes > 0 ? _dataCollectionTimeMinutes : DEFAULT_DATA_COLLECTION_MINUTES;
+}
+
+// --- Core API Interaction Methods ---
+
 /**
- * @brief Implementation of the backend status check logic.
+ * @brief Performs an HTTP POST request.
  */
-bool API::checkBackendStatus() {
+int API::_httpPost(const String& fullUrl, const String& authorizationToken, const String& jsonPayload, String& responsePayload) {
     HTTPClient http;
-    http.setTimeout(HTTP_TIMEOUT);
-    // @note As above, ensure HTTPS certificate handling if needed.
-    http.begin(BACKEND_STATUS_ENDPOINT);
+    int httpResponseCode = -1; // Default to client error
 
-    // Perform a simple GET request
-    int httpResponseCode = http.GET();
-    http.end(); // Release resources
+    if (WiFi.status() != WL_CONNECTED) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("[API_httpPost] No WiFi connection.");
+        #endif
+        return -100; // Custom error code for no WiFi
+    }
 
-    if (httpResponseCode != 200) {
-        // Backend seems unavailable or returned an error
-        _led.setState(ERROR_SEND); // Assuming ERROR_SEND indicates communication issues
-        delay(5000); // Show error
-        _led.setState(OFF);
-        // Optional: Log the failure: Serial.printf("[API] Backend status check failed, HTTP code: %d\n", httpResponseCode);
+    if (http.begin(fullUrl)) {
+        http.setTimeout(HTTP_REQUEST_TIMEOUT);
+        http.addHeader("Content-Type", "application/json");
+        if (!authorizationToken.isEmpty()) {
+            http.addHeader("Authorization", "Device " + authorizationToken);
+        }
+
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[API_httpPost] POST to: %s\n", fullUrl.c_str());
+            if(!jsonPayload.isEmpty()) Serial.printf("[API_httpPost] Payload: %s\n", jsonPayload.c_str());
+            if(!authorizationToken.isEmpty()) Serial.printf("[API_httpPost] Auth: Device %s\n", authorizationToken.substring(0,10).c_str()); // Log first 10 chars of token
+        #endif
+
+        if(jsonPayload.isEmpty()){ // For requests like /auth that might not have a body but are POST
+             httpResponseCode = http.POST("");
+        } else {
+             httpResponseCode = http.POST(jsonPayload);
+        }
+
+
+        if (httpResponseCode > 0) {
+            responsePayload = http.getString();
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[API_httpPost] Response Code: %d\n", httpResponseCode);
+                Serial.printf("[API_httpPost] Response Payload: %s\n", responsePayload.c_str());
+            #endif
+        } else {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[API_httpPost] Request failed, error: %s (Code: %d)\n", http.errorToString(httpResponseCode).c_str(), httpResponseCode);
+            #endif
+        }
+        http.end();
+    } else {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[API_httpPost] Unable to begin connection to %s\n", fullUrl.c_str());
+        #endif
+        httpResponseCode = -101; // Custom error code for connection begin failed
+    }
+    return httpResponseCode;
+}
+
+/**
+ * @brief Parses DeviceActivationResponseDto or DeviceAuthResponseDto.
+ */
+bool API::_parseAndStoreAuthResponse(const String& jsonResponse) {
+    if (jsonResponse.isEmpty()) {
         return false;
     }
 
-    // Backend responded with 200 OK
-    // Optional: Log success: Serial.println("[API] Backend status check successful (HTTP 200).");
-    return true;
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, jsonResponse);
+
+    if (error) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.print(F("[API_parse] JSON deserialization failed: "));
+            Serial.println(error.f_str());
+        #endif
+        return false;
+    }
+
+    // Extract fields - assuming DTOs have these exact names
+    // {"accessToken":"...", "refreshToken":"...", "dataCollectionTimeMinutes":...}
+    const char* newAccessToken = doc["accessToken"];
+    const char* newRefreshToken = doc["refreshToken"];
+    int newDataCollectionTime = doc["dataCollectionTime"] | 0; // Default to 0 if not present or invalid
+
+    bool success = false;
+    if (newAccessToken && newRefreshToken) { // Both tokens must be present
+        if (String(newAccessToken) != _accessToken) {
+            _saveAccessToken(String(newAccessToken));
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println(F("[API_parse] AccessToken updated."));
+            #endif
+        }
+        if (String(newRefreshToken) != _refreshToken) {
+            _saveRefreshToken(String(newRefreshToken));
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println(F("[API_parse] RefreshToken updated."));
+            #endif
+        }
+        success = true; // Tokens processed
+    } else {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[API_parse] accessToken or refreshToken missing in JSON response."));
+        #endif
+        return false; // Essential tokens missing
+    }
+    
+    if (newDataCollectionTime > 0 && newDataCollectionTime != _dataCollectionTimeMinutes) {
+        _saveDataCollectionTime(newDataCollectionTime);
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[API_parse] DataCollectionTimeMinutes updated to: %d\n", newDataCollectionTime);
+        #endif
+    } else if (doc.containsKey("dataCollectionTimeMinutes") && newDataCollectionTime <= 0) {
+        // If the key exists but the value is invalid (e.g. 0 or negative), it might be an issue.
+        // For now, we keep the existing or default. Could log a warning.
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[API_parse] Received invalid dataCollectionTimeMinutes: %d. Keeping current: %d\n", newDataCollectionTime, _dataCollectionTimeMinutes);
+        #endif
+    }
+
+
+    return success;
 }
 
 /**
- * @brief Returns the current authentication token stored in memory.
+ * @brief Attempts device activation.
  */
-String API::getAuthToken() {
-    return _authToken;
+int API::performActivation(const String& deviceId, const String& activationCode) {
+    if (deviceId.isEmpty() || activationCode.isEmpty()) {
+        return -102; // Custom error for missing params
+    }
+
+    JsonDocument doc;
+    doc["deviceId"] = deviceId.toInt(); // As per user story, DeviceId is int
+    doc["activationCode"] = activationCode;
+
+    String payload;
+    serializeJson(doc, payload);
+    String responsePayload;
+    String fullUrl = _apiBaseUrl + _apiActivatePath;
+
+    int httpCode = _httpPost(fullUrl, "", payload, responsePayload); // No auth token for activation
+
+    if (httpCode == 200) {
+        if (_parseAndStoreAuthResponse(responsePayload)) {
+            _saveActivationStatus(true);
+        } else {
+            // Successful HTTP but failed to parse or missing tokens in response
+            httpCode = -103; // Custom error for parse failure
+            _saveActivationStatus(false); // Ensure not marked as active
+        }
+    } else {
+        _saveActivationStatus(false); // Activation failed, ensure not marked as active
+    }
+    return httpCode;
+}
+
+/**
+ * @brief Checks backend and authentication.
+ */
+int API::checkBackendAndAuth() {
+    if (!_activatedFlag) {
+         #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[API_AuthCheck] Device not activated. Skipping auth check."));
+        #endif
+        return -104; // Custom error for not activated
+    }
+    if (_accessToken.isEmpty()) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[API_AuthCheck] No access token available. Attempting refresh first."));
+        #endif
+        // If no access token, try to refresh first (e.g. after a restart with valid refresh token)
+        int refreshHttpCode = performTokenRefresh();
+        if(refreshHttpCode != 200) {
+             // Refresh failed, cannot proceed with auth check using an access token
+            return refreshHttpCode; // Return the error code from refresh attempt
+        }
+        // If refresh was successful, _accessToken is now populated. Proceed.
+    }
+
+    String responsePayload;
+    String fullUrl = _apiBaseUrl + _apiAuthPath;
+
+    // Create the JSON payload for the /auth request
+    JsonDocument docAuthRequest;
+    docAuthRequest["token"] = _accessToken; // Use the current access token
+    String authRequestPayload;
+    serializeJson(docAuthRequest, authRequestPayload);
+
+    if (authRequestPayload.isEmpty() && !_accessToken.isEmpty()) { // Check if serialization failed but token was present
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[API_AuthCheck] Failed to serialize auth request payload for /auth endpoint."));
+        #endif
+        // Return a custom error code indicating payload serialization failure for a non-empty token
+        // to distinguish from an empty token case if that were handled differently.
+        return -106; 
+    }
+    
+    // If _accessToken was empty and performTokenRefresh populated it, 
+    // authRequestPayload would have been built with the new token.
+    // If _accessToken was initially present, authRequestPayload uses that.
+    // The _httpPost method requires an accessToken for its header, which should be the same one used in the payload.
+    int httpCode = _httpPost(fullUrl, _accessToken, authRequestPayload, responsePayload);
+
+    if (httpCode == 200) {
+        _parseAndStoreAuthResponse(responsePayload); // Update tokens/collection time if different
+    } else if (httpCode == 401) { // Unauthorized, token likely expired or invalid
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[API_AuthCheck] Auth endpoint returned 401. Attempting token refresh."));
+        #endif
+        httpCode = performTokenRefresh(); // This will handle deactivation on critical refresh failure
+    }
+    // Other HTTP codes (e.g., 500, 400, network errors) are returned as is.
+    return httpCode;
+}
+
+/**
+ * @brief Attempts token refresh.
+ */
+int API::performTokenRefresh() {
+    if (_refreshToken.isEmpty()) {
+         #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[API_Refresh] No refresh token available. Cannot refresh."));
+        #endif
+        _saveActivationStatus(false); // Cannot refresh, so consider deactivated
+        return -105; // Custom error for no refresh token
+    }
+
+    JsonDocument doc;
+    doc["token"] = _refreshToken; // As per user story: {"token": stored_refresh_token}
+
+    String payload;
+    serializeJson(doc, payload);
+    String responsePayload;
+    String fullUrl = _apiBaseUrl + _apiRefreshTokenPath;
+
+    // Assuming refresh token endpoint does not need the (potentially expired) access token for Auth header
+    int httpCode = _httpPost(fullUrl, "", payload, responsePayload);
+
+    if (httpCode == 200) {
+        if (!_parseAndStoreAuthResponse(responsePayload)) {
+            // Successful HTTP but failed to parse or missing tokens in response
+            httpCode = -103; // Custom error for parse failure
+            // Do not necessarily deactivate here, as old tokens might still be somewhat valid
+            // until explicitly invalidated by a 401 on refresh itself.
+        }
+    } else if (httpCode == 401) { // Refresh token itself is invalid/expired
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[API_Refresh] Refresh token rejected (401). Deactivating device."));
+        #endif
+        _saveAccessToken("");    // Clear tokens
+        _saveRefreshToken("");
+        _saveActivationStatus(false); // Deactivate
+    }
+    // Other HTTP codes are returned as is.
+    return httpCode;
 }

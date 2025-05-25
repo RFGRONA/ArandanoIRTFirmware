@@ -1,119 +1,169 @@
 /**
  * @file API.h
- * @brief Defines the API class for handling device activation, backend communication,
- * and storing relevant data in Non-Volatile Storage (NVS).
- * @note This class interacts with a backend API over HTTPS.
+ * @brief Defines the API class for handling device communication with the AIRT backend.
+ *
+ * This class manages device activation, authentication token retrieval and refresh,
+ * and stores essential operational data (tokens, activation state, data collection interval)
+ * in Non-Volatile Storage (NVS). It provides methods to interact with specific API endpoints.
+ * All HTTP communication and NVS operations are encapsulated within this class.
+ * It does NOT directly control LEDs; status should be inferred from method return values.
  */
 #ifndef API_H
 #define API_H
 
-#include <WiFi.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
-#include <Preferences.h>
-#include "LEDStatus.h" // Assuming LEDStatus.h defines the necessary states like ERROR_AUTH, ERROR_SEND, OFF
+#include <Arduino.h>
+#include <Preferences.h> // For NVS access
+#include <HTTPClient.h>  // For making HTTP requests
+#include <ArduinoJson.h> // For JSON parsing and serialization
 
-// Backend Endpoints (HTTPS is used)
-#define ACTIVATION_ENDPOINT       "https://backend.example.com/activate"        ///< Endpoint for device activation requests.
-#define CHECK_ACTIVATION_ENDPOINT "https://backend.example.com/check_activation/" ///< Endpoint for checking device activation status (expects device ID appended).
-#define BACKEND_STATUS_ENDPOINT   "https://backend.example.com/status"          ///< Endpoint for checking backend health/status.
+// NVS Namespace and Keys
+#define NVS_NAMESPACE "airt_config"
+#define KEY_ACCESS_TOKEN "acc_token"
+#define KEY_REFRESH_TOKEN "ref_token"
+#define KEY_DATA_COLLECTION_TIME "coll_time"
+#define KEY_IS_ACTIVATED "is_active"
 
-// --- Security Credentials ---
-// @warning These credentials (JWT, Device ID) are hardcoded.
-//          For production environments, consider more secure methods like provisioning or secure storage.
-#define ACTIVATION_JWT "your_activation_jwt_here" ///< Activation JSON Web Token.
-#define DEVICE_ID      "your_device_id_here"      ///< Unique Device Identifier.
+// Default value for data collection time if not set by backend
+#define DEFAULT_DATA_COLLECTION_MINUTES 60
 
-// Activation States stored in NVS
-#define STATE_ACTIVATED     "ACTIVATED"     ///< String identifier for the activated state.
-#define STATE_NO_ACTIVATED  "NO_ACTIVATED"  ///< String identifier for the non-activated state.
-
-// Keys for storing data in Preferences (NVS)
-#define PREF_ACTIVATION_STATE "activation_state" ///< NVS key for the activation state.
-#define PREF_AUTH_TOKEN       "auth_token"       ///< NVS key for the authentication token.
-
-// HTTP Request Configuration
-#define HTTP_TIMEOUT     10000 ///< HTTP request timeout in milliseconds (10 seconds).
-#define HTTP_MAX_RETRIES 3     ///< Maximum number of retry attempts for HTTP requests.
-
-/**
- * @class API
- * @brief Manages device activation, authentication token retrieval, and backend status checks via HTTPS.
- *
- * This class handles the communication with the backend API for critical operations
- * like activating the device upon first use and periodically checking its status
- * and retrieving authentication tokens. It uses the Preferences library to persist
- * the activation state and the latest auth token in Non-Volatile Storage (NVS).
- * It also uses an LEDStatus object to provide visual feedback on operation success or failure.
- * @note This class might be under development or requires specific backend infrastructure.
- */
 class API {
 public:
     /**
      * @brief Constructor for the API class.
-     * Initializes the Preferences library namespace and loads the auth token from NVS if available.
+     * Initializes API endpoint paths and loads persistent data from NVS.
+     * @param base_url The base URL of the AIRT API.
+     * @param activate_path The relative path for the device activation endpoint.
+     * @param auth_path The relative path for the device authentication/status check endpoint.
+     * @param refresh_path The relative path for the token refresh endpoint.
      */
-    API();
+    API(const String& base_url, const String& activate_path, const String& auth_path, const String& refresh_path);
+
+    /**
+     * @brief Destructor. Closes Preferences.
+     */
+    ~API();
+
+    /**
+     * @brief Checks if the device is currently marked as activated.
+     * @return True if the device has successfully activated and stored its state, false otherwise.
+     */
+    bool isActivated() const;
+
+    /**
+     * @brief Retrieves the current stored access token.
+     * @return The access token as a String. May be empty if no token is stored or valid.
+     */
+    String getAccessToken() const;
+
+    /**
+     * @brief Retrieves the configured base URL for the API.
+     * @return The base API URL as a String.
+     */
+    String getBaseApiUrl() const;
+
+    /**
+     * @brief Retrieves the current data collection interval in minutes.
+     * This value is typically obtained from the backend.
+     * @return The data collection interval in minutes. Returns a default if not set.
+     */
+    int getDataCollectionTimeMinutes() const;
 
     /**
      * @brief Attempts to activate the device with the backend.
-     * Sends the predefined activation JWT to the activation endpoint.
-     * If the backend responds with HTTP 200 OK, it saves the "ACTIVATED" state to NVS.
-     * Otherwise, it indicates an authentication error via LED and saves "NO_ACTIVATED" state.
-     * Includes retry logic defined by HTTP_MAX_RETRIES.
-     * @return true if activation was successful within retry limits, false otherwise.
+     * Sends the device ID and activation code to the activation endpoint.
+     * On success, stores the received access token, refresh token, and data collection time.
+     * Sets the device activation status in NVS.
+     * @param deviceId The unique ID of the device.
+     * @param activationCode The activation code for the device.
+     * @return An integer HTTP status code from the activation attempt. 200 for success.
+     * Returns negative values for client-side errors (e.g., HTTPClient errors).
      */
-    bool activateDevice();
+    int performActivation(const String& deviceId, const String& activationCode);
 
     /**
-     * @brief Verifies if the device is still considered active by the backend and retrieves the auth token.
-     * Sends the device ID to the check activation endpoint. Expects an HTTP 200 OK response
-     * containing a JSON payload with an authentication token (e.g., {"token": "new_token"}).
-     * - If a new token is received (different from the currently stored one), it's updated
-     * both in memory and in NVS.
-     * - If the token is the same, no update occurs.
-     * If the response is not 200 OK or the token is missing/invalid, it indicates an
-     * authentication error via LED and saves the "NO_ACTIVATED" state.
-     * Includes retry logic.
-     * @return true if the device is confirmed active and token handling was successful, false otherwise.
+     * @brief Checks the backend status and device authentication by calling the '/auth' endpoint.
+     * Uses the current access token for authorization. If the token is invalid (HTTP 401),
+     * it attempts to refresh the token using performTokenRefresh().
+     * Updates tokens and data collection time if they differ from the backend's response.
+     * @return An integer HTTP status code from the auth attempt. 200 for success.
+     * If a 401 occurs and token refresh is attempted, the status of the refresh attempt is returned.
+     * Returns negative values for client-side errors.
      */
-    bool checkActivation();
+    int checkBackendAndAuth();
 
     /**
-     * @brief Performs a simple check to see if the backend API is online and reachable.
-     * Makes a GET request to the backend status endpoint.
-     * Considers the backend online if it receives an HTTP 200 OK response.
-     * (Optionally, could be extended to check the response body, e.g., {"status":"OK"}).
-     * Indicates a communication error via LED on failure.
-     * @return true if the backend responded successfully (HTTP 200), false otherwise.
+     * @brief Attempts to refresh the access token using the stored refresh token.
+     * Calls the '/refresh-token' endpoint.
+     * On success, updates the stored access token, refresh token, and data collection time.
+     * If the refresh token is invalid (HTTP 401), it deactivates the device.
+     * @return An integer HTTP status code from the refresh attempt. 200 for success.
+     * Returns negative values for client-side errors.
      */
-    bool checkBackendStatus();
-
-    /**
-     * @brief Retrieves the currently stored authentication token.
-     * Returns the token held in the volatile memory (_authToken).
-     * @return String containing the current authentication token. Might be empty if none is loaded or retrieved.
-     */
-    String getAuthToken();
+    int performTokenRefresh();
 
 private:
-    LEDStatus _led;          ///< LEDStatus object instance for visual feedback.
-    Preferences _preferences;///< Preferences object instance for NVS access.
-    String _authToken;       ///< In-memory copy of the authentication token.
+    Preferences _preferences; ///< Preferences instance for NVS operations.
+
+    // Configuration obtained from constructor (from main.cpp's Config struct)
+    String _apiBaseUrl;
+    String _apiActivatePath;
+    String _apiAuthPath;
+    String _apiRefreshTokenPath;
+
+    // In-memory state variables, loaded from NVS at startup
+    String _accessToken;
+    String _refreshToken;
+    int _dataCollectionTimeMinutes;
+    bool _activatedFlag;
 
     /**
-     * @brief Saves the given activation state string to NVS.
-     * Uses the PREF_ACTIVATION_STATE key.
-     * @param state The activation state string to save (e.g., STATE_ACTIVATED or STATE_NO_ACTIVATED).
+     * @brief Loads all persistent data items from NVS into member variables.
+     * Called by the constructor.
      */
-    void saveActivationState(const char* state);
+    void _loadPersistentData();
 
     /**
-     * @brief Saves the given authentication token to NVS and updates the in-memory copy.
-     * Uses the PREF_AUTH_TOKEN key.
-     * @param token The authentication token string to save.
+     * @brief Saves the current access token to NVS and updates the member variable.
+     * @param token The access token to save.
      */
-    void saveAuthToken(const String &token);
+    void _saveAccessToken(const String& token);
+
+    /**
+     * @brief Saves the current refresh token to NVS and updates the member variable.
+     * @param token The refresh token to save.
+     */
+    void _saveRefreshToken(const String& token);
+
+    /**
+     * @brief Saves the data collection time (in minutes) to NVS and updates the member variable.
+     * @param minutes The data collection interval in minutes.
+     */
+    void _saveDataCollectionTime(int minutes);
+
+    /**
+     * @brief Saves the activation status to NVS and updates the member variable.
+     * @param activated The activation status (true or false).
+     */
+    void _saveActivationStatus(bool activated);
+
+    /**
+     * @brief Performs an HTTP POST request with a JSON payload.
+     * @param fullUrl The complete URL for the POST request.
+     * @param authorizationToken The token to use for the 'Authorization: Device <token>' header. Can be empty if no auth needed.
+     * @param jsonPayload The JSON string to send as the request body.
+     * @param responsePayload Buffer to store the HTTP response payload.
+     * @return The HTTP status code, or a negative value for client errors.
+     */
+    int _httpPost(const String& fullUrl, const String& authorizationToken, const String& jsonPayload, String& responsePayload);
+
+    /**
+     * @brief Parses the common DeviceAuthResponseDto or DeviceActivationResponseDto.
+     * Extracts accessToken, refreshToken, and dataCollectionTimeMinutes.
+     * Updates stored values if new ones are different.
+     * @param jsonResponse The JSON string received from the API.
+     * @return True if parsing was successful and required fields were found, false otherwise.
+     */
+    bool _parseAndStoreAuthResponse(const String& jsonResponse);
 };
 
 #endif // API_H
