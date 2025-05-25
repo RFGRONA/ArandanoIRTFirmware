@@ -23,7 +23,7 @@
 
 // --- Optional Debugging ---
 // Uncomment the following line to enable Serial output for detailed debugging information.
-// #define ENABLE_DEBUG_SERIAL
+#define ENABLE_DEBUG_SERIAL
 // --------------------------
 
 // --- Local Libraries (Project Specific Classes) ---
@@ -35,8 +35,8 @@
 #include "EnvironmentDataJSON.h"
 #include "MultipartDataSender.h"
 #include "WiFiManager.h"
-// #include "ErrorLogger.h" // Commented out (functionality possibly deferred or backend not ready)
-// #include "API.h"           // Commented out (functionality possibly deferred or backend not ready)
+#include "ErrorLogger.h" 
+#include "API.h"           
 
 // --- Hardware Pin Definitions ---
 #define I2C_SDA 47   ///< GPIO pin assigned for the I2C SDA (Data) line.
@@ -53,11 +53,19 @@
  * @brief Holds application configuration parameters loaded from LittleFS or default values.
  */
 struct Config {
-    String wifi_ssid = "DEFAULT_SSID"; ///< Default WiFi SSID used if loading from config file fails.
-    String wifi_pass = "";             ///< Default WiFi Password used if loading fails (or network is open).
-    String api_env = "";               ///< Default API endpoint URL for sending environmental data.
-    String api_img = "";               ///< Default API endpoint URL for sending image/thermal data (multipart).
-    int sleep_sec = 60;                ///< Default deep sleep duration in seconds between cycles.
+    String wifi_ssid = "DEFAULT_SSID";
+    String wifi_pass = "";
+    int deviceId = 0; 
+    String activationCode = ""; 
+    String apiBaseUrl = ""; 
+    String apiActivatePath = "/api/device-api/activate";
+    String apiAuthPath = "/api/device-api/auth";
+    String apiRefreshTokenPath = "/api/device-api/refresh-token";
+    String apiLogPath = "/api/device-api/log";
+    String apiAmbientDataPath = "/api/device-api/ambient-data";
+    String apiCaptureDataPath = "/api/device-api/capture-data";
+    int sleep_sec = 60;
+    bool debug_enabled = false; 
 };
 Config config; // Global instance holding the application's current configuration.
 // -----------------------------
@@ -74,7 +82,9 @@ DHT22Sensor dhtSensor(DHT_PIN);                   ///< Temperature/Humidity sens
 OV2640Sensor camera;                              ///< Visual camera object (uses ESP-IDF driver).
 LEDStatus led;                                    ///< Status LED management object.
 WiFiManager wifiManager;                          ///< WiFi connection management object.
-// ErrorLogger errorLogger;                         ///< Error logger object (functionality currently commented out).
+
+// --- Declare API object globally, initialize in setup ---
+API* api_comm = nullptr;
 
 // --- Function Prototypes ---
 
@@ -89,8 +99,9 @@ bool initializeSensors();
 bool readEnvironmentData();
 /** @brief Captures thermal and visual image data into allocated buffers. */
 bool captureImages(uint8_t** jpegImage, size_t& jpegLength, float** thermalData);
+
 /** @brief Sends captured image data (thermal and visual) to the image API endpoint. */
-bool sendImageData(uint8_t* jpegImage, size_t jpegLength, float* thermalData);
+// bool sendImageData(uint8_t* jpegImage, size_t jpegLength, float* thermalData);
 
 // System Control
 /** @brief Enters ESP32 deep sleep for a specified duration. */
@@ -114,27 +125,17 @@ void loadConfigAndSetCredentials();
 /** @brief Handles actions to take if sensor initialization fails (LED, sleep). */
 void handleSensorInitFailure();
 
-// Sensor Initialization Helper Prototypes
-/** @brief Initializes the DHT22 sensor. */
-bool initDHTSensor(); // Note: Current implementation in initializeSensors() just calls dhtSensor.begin() directly.
-/** @brief Initializes the I2C bus (Wire) with defined pins and clock speed. */
-bool initI2C(); // Note: Current implementation is directly inside initializeSensors().
-/** @brief Initializes the BH1750 light sensor. */
-bool initLightSensor(); // Note: Current implementation is directly inside initializeSensors().
-/** @brief Initializes the MLX90640 thermal sensor. */
-bool initThermalSensor(); // Note: Current implementation is directly inside initializeSensors().
-/** @brief Initializes the OV2640 camera sensor. */
-bool initCameraSensor(); // Note: Current implementation is directly inside initializeSensors().
-
 // Loop Helper Prototypes
 /** @brief Handles the initial WiFi connection check in the main loop, sleeping on failure. */
 bool handleWiFiConnection();
 /** @brief Orchestrates reading and sending environmental data tasks. */
-bool performEnvironmentTasks();
+bool performEnvironmentTasks(Config& cfg, API& api_obj, LEDStatus& status_led);
 /** @brief Orchestrates capturing and sending image data tasks. */
-bool performImageTasks(uint8_t** jpegImage, size_t& jpegLength, float** thermalData);
+bool performImageTasks(Config& cfg, API& api_obj, LEDStatus& status_led, uint8_t** jpegImage, size_t& jpegLength, float** thermalData);
 /** @brief Performs final actions before entering deep sleep (LED status, FS unmount). */
 void prepareForSleep(bool cycleStatusOK);
+/** @brief Handles API authentication and activation, including token refresh. */
+bool handleApiAuthenticationAndActivation(Config& cfg, API& api_obj, LEDStatus& status_led);
 
 // Environment Task Helper Prototypes
 /** @brief Reads the light sensor value with retries. */
@@ -142,7 +143,9 @@ bool readLightSensorWithRetry(float &lightLevel);
 /** @brief Reads temperature and humidity from the DHT sensor with retries. */
 bool readDHTSensorWithRetry(float &temperature, float &humidity);
 /** @brief Sends the collected environmental data to the configured server endpoint. */
-bool sendEnvironmentDataToServer(float lightLevel, float temperature, float humidity);
+bool sendEnvironmentDataToServer(Config& cfg, API& api_obj, float lightLevel, float temperature, float humidity);
+
+bool sendImageData(Config& cfg, API& api_obj, uint8_t* jpegImage, size_t jpegLength, float* thermalData);
 
 // Image Capture Helper Prototypes
 /** @brief Captures a thermal data frame and copies it into a newly allocated buffer. */
@@ -184,6 +187,22 @@ void setup() {
     // Uses default values if loading fails, allowing operation with defaults.
     loadConfigAndSetCredentials();
 
+    // --- Initialize API object AFTER config is loaded ---
+    api_comm = new API(config.apiBaseUrl,
+                       config.apiActivatePath,
+                       config.apiAuthPath,
+                       config.apiRefreshTokenPath);
+    if (api_comm == nullptr) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("CRITICAL: Failed to allocate memory for API object. Halting."));
+        #endif
+        led.setState(ERROR_AUTH); 
+        while(1) { delay(1000); } 
+    }
+
+    // Initialize WiFi (sets mode, does not connect yet)
+    wifiManager.begin();
+
     // Initialize all connected hardware sensors using the refactored helper function.
     if (!initializeSensors()) {
         // If any sensor fails initialization, handle the failure gracefully.
@@ -218,64 +237,162 @@ void setup() {
  */
 void loop() {
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("\n======================================");
-        Serial.println("--- Starting New Operational Cycle ---");
-        Serial.println("======================================");
+        Serial.println(F("\n======================================"));
+        Serial.println(F("--- Starting New Operational Cycle ---"));
+        // Print memory status at the start of a cycle for debugging
+        Serial.printf("Free Heap: %u bytes, Min Free Heap: %u bytes\n", ESP.getFreeHeap(), ESP.getMinFreeHeap());
+        #ifdef BOARD_HAS_PSRAM
+            Serial.printf("Free PSRAM: %u bytes\n", ESP.getFreePsram());
+        #endif
+        Serial.println(F("======================================"));
     #endif
 
     // Perform a visual blink sequence to indicate the start of a new cycle.
     ledBlink();
 
-    // Track the overall success status of the current operational cycle.
-    // Set to false if any critical step fails.
-    bool everythingOK = true;
+    // Tracks the overall success of data operations in this cycle
+    bool cycleStatusOK = true;
+    // Initialize logUrl with the base API URL and log path.
+    String logUrl = "";
+    // Ensure api_comm is initialized before using it.
+    if (api_comm != nullptr) { 
+        logUrl = api_comm->getBaseApiUrl() + config.apiLogPath;
+    } else {
+        // This should not happen if setup completed. Halt or handle error.
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("CRITICAL: api_comm is null in loop(). Halting."));
+        #endif
+        led.setState(ERROR_DATA); // Generic system error
+        while(1) delay(1000);
+    }
 
     // --- 1. Handle WiFi Connection ---
-    // Ensures WiFi is connected before proceeding. Sleeps on failure.
-    if (!handleWiFiConnection()) {
-        // If WiFi connection failed, handleWiFiConnection() already initiated sleep.
-        // Return here prevents further execution in this failed cycle.
-        return;
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("Step 1: Checking WiFi Connection..."));
+    #endif
+    wifiManager.handleWiFi(); // Non-blocking handler
+    if (!ensureWiFiConnected(WIFI_CONNECT_TIMEOUT_MS)) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("WiFi connection failed. Entering deep sleep."));
+        #endif
+        led.setState(ERROR_WIFI); // ensureWiFiConnected should set this, but good to be sure
+        prepareForSleep(false);   // Mark cycle as not OK
+        deepSleep(config.sleep_sec); // Use fallback sleep duration
+        return; // Exit loop
+    }
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("WiFi Connection OK."));
+    #endif
+
+    // --- 2. Handle API Activation and Authentication ---
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("Step 2: Handling API Activation & Authentication..."));
+    #endif
+    if (api_comm == nullptr) { // Should not happen if setup is correct
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("CRITICAL: api_comm object is null in loop. Halting."));
+        #endif
+        led.setState(ERROR_DATA); // Generic system error
+        while(1) delay(1000); // Halt
     }
 
-    // --- 2. Perform Environmental Data Tasks ---
-    // Read environmental sensors and send data to the server.
-    if (!performEnvironmentTasks()) {
-        // If reading or sending env data failed, mark the cycle as having errors.
-        // Specific error LED state should be set within performEnvironmentTasks.
-        everythingOK = false;
+    bool apiReady = handleApiAuthenticationAndActivation(config, *api_comm, led);
+
+    if (!apiReady) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("API not ready (activation/auth failed). Entering deep sleep."));
+        #endif
+        // LED state should have been set by handleApiAuthenticationAndActivation
+        prepareForSleep(false);
+        deepSleep(api_comm->getDataCollectionTimeMinutes() > 0 ? api_comm->getDataCollectionTimeMinutes() * 60 : config.sleep_sec);
+        return; // Exit loop
+    }
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("API Ready. AccessToken available. Proceeding with data tasks."));
+    #endif
+
+    // --- 3. Perform Environmental Data Tasks ---
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("Step 3: Performing Environment Data Tasks..."));
+    #endif
+    if (!performEnvironmentTasks(config, *api_comm, led)) {
+        cycleStatusOK = false; // Mark cycle as having an error
+        // Error logging and LED state should be handled within performEnvironmentTasks or its sub-functions
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("Environment data tasks failed."));
+        #endif
     }
 
-    // --- 3. Perform Image Data Tasks ---
-    // Pointers for allocated buffers needed for capture and cleanup.
+    // --- 4. Perform Image Data Tasks ---
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("Step 4: Performing Image Data Tasks..."));
+    #endif
     uint8_t* jpegImage = nullptr;
     size_t jpegLength = 0;
-    float* thermalData = nullptr;
+    float* thermalData = nullptr; // MLX90640 data
 
-    // Only attempt image tasks if previous critical steps (like WiFi) were successful.
-    // Can decide whether to proceed if only env tasks failed based on requirements.
-    // Current logic proceeds even if env tasks failed, but marks everythingOK as false.
-    // Consider adding 'if (everythingOK)' here if image tasks depend on env tasks success.
-    if (!performImageTasks(&jpegImage, jpegLength, &thermalData)) {
-        // If capturing or sending image data failed, mark the cycle as having errors.
-        // Specific error LED state should be set within performImageTasks.
-        everythingOK = false;
+    // Pass config and api_comm to performImageTasks
+    if (!performImageTasks(config, *api_comm, led, &jpegImage, jpegLength, &thermalData)) {
+        cycleStatusOK = false; // Mark cycle as having an error
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("Image data tasks failed."));
+        #endif
     }
-    // Note: jpegImage and thermalData pointers are updated by performImageTasks.
+    // Note: jpegImage and thermalData are allocated by captureImages (called within performImageTasks)
+    // and need to be freed by cleanupResources.
 
-    // --- 4. Cleanup Allocated Resources ---
-    // Frees memory allocated for image/thermal buffers and deinitializes the camera.
-    // This is crucial to prevent memory leaks and prepare for sleep.
-    // Pass the potentially updated pointers (even if null) to the cleanup function.
+    // --- 5. Cleanup Allocated Resources ---
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("Step 5: Cleaning up resources..."));
+    #endif
     cleanupResources(jpegImage, thermalData);
 
-    // --- 5. Prepare for Deep Sleep ---
-    // Set final LED status based on cycle success, blink, unmount filesystem.
-    prepareForSleep(everythingOK);
+    // --- 6. Log Cycle Status ---
+    if (!logUrl.isEmpty() && !api_comm->getAccessToken().isEmpty()) {
+        if (cycleStatusOK) {
+            ErrorLogger::sendLog(logUrl, api_comm->getAccessToken(), LOG_TYPE_INFO, "Operational cycle completed successfully.");
+        } else {
+            ErrorLogger::sendLog(logUrl, api_comm->getAccessToken(), LOG_TYPE_WARNING, "Operational cycle completed with errors.");
+        }
+    }
 
-    // --- 6. Enter Deep Sleep ---
-    // Put the ESP32 into deep sleep mode for the duration specified in the config.
-    deepSleep(config.sleep_sec);
+    // --- 7. Prepare for Deep Sleep ---
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("Step 7: Preparing for Deep Sleep..."));
+    #endif
+    prepareForSleep(cycleStatusOK);
+
+    // --- 8. Enter Deep Sleep ---
+    unsigned long sleepDurationSec = api_comm->getDataCollectionTimeMinutes() > 0 ?
+                                     api_comm->getDataCollectionTimeMinutes() * 60 :
+                                     config.sleep_sec;
+    deepSleep(sleepDurationSec);
+    // --- Execution stops here until wake up ---
+
+    // --- 5. Cleanup Allocated Resources ---
+    cleanupResources(jpegImage, thermalData); // Frees jpegImage and thermalData if allocated
+
+    // --- 6. Send Final Cycle Log ---
+    // (Moved here to ensure it's sent after all data operations)
+    if (cycleStatusOK) {
+        ErrorLogger::sendLog(logUrl, api_comm->getAccessToken(), LOG_TYPE_INFO, "Operational cycle completed successfully.");
+    } else {
+        ErrorLogger::sendLog(logUrl, api_comm->getAccessToken(), LOG_TYPE_WARNING, "Operational cycle completed with errors.");
+    }
+
+    // --- 7. Prepare for Deep Sleep ---
+    prepareForSleep(cycleStatusOK);
+
+    // --- 8. Enter Deep Sleep ---
+    // sleepDurationSec already declared above, just update if needed
+    sleepDurationSec = config.sleep_sec; // Default fallback
+    if (api_comm->getDataCollectionTimeMinutes() > 0) {
+        sleepDurationSec = api_comm->getDataCollectionTimeMinutes() * 60UL;
+    }
+     #ifdef ENABLE_DEBUG_SERIAL
+        Serial.printf("[Loop] Determined sleep duration: %lu seconds.\n", sleepDurationSec);
+    #endif
+    deepSleep(sleepDurationSec);
     // --- Execution stops here until the device wakes up ---
 }
 
@@ -283,6 +400,102 @@ void loop() {
 // =========================================================================
 // ===                        HELPER FUNCTIONS                           ===
 // =========================================================================
+
+/**
+ * @brief Handles the device activation and authentication process with the API.
+ * This function checks if the device is activated. If not, it attempts to activate it.
+ * If activated (or after successful activation), it checks backend status and authentication.
+ * Logs relevant events and errors. Sets LED status accordingly.
+ * @param cfg A reference to the global Config structure.
+ * @param api_obj A reference to the global API object.
+ * @param status_led A reference to the global LEDStatus object.
+ * @return true if the device is activated, authenticated, and ready for data operations.
+ * @return false if activation or authentication fails critically.
+ */
+bool handleApiAuthenticationAndActivation(Config& cfg, API& api_obj, LEDStatus& status_led) {
+    String logUrl = api_obj.getBaseApiUrl() + cfg.apiLogPath;
+
+    if (!api_obj.isActivated()) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[API_Handler] Device not activated. Attempting activation..."));
+        #endif
+        status_led.setState(CONNECTING_WIFI); // Or a specific "ACTIVATING" state if you add one
+
+        int activationHttpCode = api_obj.performActivation(String(cfg.deviceId), cfg.activationCode);
+
+        if (activationHttpCode == 200) {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println(F("[API_Handler] Activation successful."));
+            #endif
+            // Send INFO log for successful activation.
+            // Check for token availability before trying to send an authenticated log.
+            String currentTokenForLog = api_obj.getAccessToken(); 
+            if (!currentTokenForLog.isEmpty()) {
+                ErrorLogger::sendLog(logUrl, currentTokenForLog, LOG_TYPE_INFO, "Device activated successfully. DeviceID: " + String(cfg.deviceId));
+            } else {
+                #ifdef ENABLE_DEBUG_SERIAL
+                    Serial.println(F("[API_Handler] Activation HTTP 200, but no access token available for logging."));
+                #endif
+                // This case might indicate an issue in API::performActivation's token parsing/storage on HTTP 200
+            }
+            if (!api_obj.getAccessToken().isEmpty()) {
+                ErrorLogger::sendLog(logUrl, api_obj.getAccessToken(), LOG_TYPE_INFO, "Device activated successfully. DeviceID: " + String(cfg.deviceId));
+            } else {
+                 #ifdef ENABLE_DEBUG_SERIAL
+                    Serial.println(F("[API_Handler] Activation reported success, but no access token found for logging."));
+                 #endif
+                 // This case might indicate an issue in API::performActivation's token parsing/storage on HTTP 200
+            }
+            status_led.setState(ALL_OK); // Indicate success briefly
+            delay(500);
+            // Now that it's activated, proceed to checkBackendAndAuth to ensure tokens are fine
+            // and dataCollectionTime is potentially updated.
+        } else {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[API_Handler] Activation failed. HTTP Code: %d\n", activationHttpCode);
+            #endif
+            status_led.setState(ERROR_AUTH); // Persistent auth error
+            // Try to send an ERROR log. Since activation failed, we might not have a token.
+            // The ErrorLogger::sendLog function should ideally handle an empty accessToken gracefully (e.g., not send or try unauthenticated).
+            // For now, we attempt, but it might fail if the log endpoint requires auth.
+            ErrorLogger::sendLog(logUrl, "", LOG_TYPE_ERROR, "Device activation failed. HTTP Code: " + String(activationHttpCode) + ", DeviceID: " + String(cfg.deviceId));
+            return false; // Critical failure, cannot proceed.
+        }
+    }
+
+    // If we reach here, device is (or was just) activated.
+    // Perform backend/auth check.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[API_Handler] Device activated. Performing backend and auth check..."));
+    #endif
+    status_led.setState(CONNECTING_WIFI); // Indicates network activity
+
+    int authHttpCode = api_obj.checkBackendAndAuth();
+
+    if (authHttpCode == 200) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[API_Handler] Backend & Auth check successful."));
+        #endif
+        ErrorLogger::sendLog(logUrl, api_obj.getAccessToken(), LOG_TYPE_INFO, "Backend and Auth check successful.");
+        status_led.setState(ALL_OK);
+        return true; // Ready to operate
+    } else {
+        // checkBackendAndAuth internally handles setting isActivated=false on critical refresh failure.
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[API_Handler] Backend & Auth check failed. HTTP Code: %d\n", authHttpCode);
+        #endif
+        status_led.setState(ERROR_AUTH);
+
+        String errorMessage = "Backend/Auth check failed. HTTP Code: " + String(authHttpCode);
+        if (!api_obj.isActivated()) { // Check if it was deactivated due to refresh failure
+            errorMessage += ". Device has been deactivated.";
+        }
+        ErrorLogger::sendLog(logUrl, api_obj.getAccessToken(), LOG_TYPE_ERROR, errorMessage);
+        // Even if getAccessToken() is empty due to deactivation, sendLog should handle it.
+
+        return false; // Critical failure or backend not ready.
+    }
+}
 
 /**
  * @brief Loads configuration from a JSON file on LittleFS into the global 'config' struct.
@@ -325,20 +538,39 @@ bool loadConfiguration(const char *filename) {
 
     // Extract configuration values from the parsed JSON document.
     // The `|` operator provides a default value if the key is missing or the value is null.
-    config.wifi_ssid = doc["wifi_ssid"] | config.wifi_ssid; // Keep default if missing
-    config.wifi_pass = doc["wifi_pass"] | config.wifi_pass; // Keep default if missing
-    config.api_env = doc["api_env"] | config.api_env;     // Keep default if missing
-    config.api_img = doc["api_img"] | config.api_img;     // Keep default if missing
-    config.sleep_sec = doc["sleep_sec"] | config.sleep_sec; // Keep default if missing
+    config.wifi_ssid = doc["wifi_ssid"] | config.wifi_ssid;
+    config.wifi_pass = doc["wifi_pass"] | config.wifi_pass;
 
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Configuration loaded successfully from file:");
-        Serial.println("  WiFi SSID: " + config.wifi_ssid);
-        Serial.println("  WiFi Pass: [REDACTED]"); // Avoid printing the password to Serial.
-        Serial.println("  API Env URL: " + config.api_env);
-        Serial.println("  API Img URL: " + config.api_img);
-        Serial.println("  Sleep Seconds: " + String(config.sleep_sec));
-    #endif
+    config.deviceId = doc["FIRMWARE_DEVICE_ID"] | config.deviceId;
+    config.activationCode = doc["FIRMWARE_ACTIVATION_CODE"] | config.activationCode;
+
+    config.apiBaseUrl = doc["api_base_url"] | config.apiBaseUrl;
+    config.apiActivatePath = doc["api_activate_path"] | config.apiActivatePath;
+    config.apiAuthPath = doc["api_auth_path"] | config.apiAuthPath;
+    config.apiRefreshTokenPath = doc["api_refresh_token_path"] | config.apiRefreshTokenPath;
+    config.apiLogPath = doc["api_log_path"] | config.apiLogPath;
+    config.apiAmbientDataPath = doc["api_ambient_data_path"] | config.apiAmbientDataPath;
+    config.apiCaptureDataPath = doc["api_capture_data_path"] | config.apiCaptureDataPath;
+
+    config.sleep_sec = doc["sleep_sec"] | config.sleep_sec;
+    config.debug_enabled = doc["debug_enabled"] | config.debug_enabled; 
+
+#ifdef ENABLE_DEBUG_SERIAL
+    Serial.println("Configuration loaded successfully from file:");
+    Serial.println("  WiFi SSID: " + config.wifi_ssid);
+    // Serial.println("  WiFi Pass: [REDACTED]"); // Keep password redacted
+    Serial.println("  Device ID: " + String(config.deviceId));
+    // Serial.println("  Activation Code: [REDACTED]"); // Activation code should also be redacted
+    Serial.println("  API Base URL: " + config.apiBaseUrl);
+    Serial.println("  API Activate Path: " + config.apiActivatePath);
+    Serial.println("  API Auth Path: " + config.apiAuthPath);
+    Serial.println("  API Refresh Token Path: " + config.apiRefreshTokenPath);
+    Serial.println("  API Log Path: " + config.apiLogPath);
+    Serial.println("  API Ambient Data Path: " + config.apiAmbientDataPath);
+    Serial.println("  API Capture Data Path: " + config.apiCaptureDataPath);
+    Serial.println("  Sleep Seconds: " + String(config.sleep_sec));
+    Serial.println("  Debug Enabled: " + String(config.debug_enabled ? "true" : "false"));
+#endif
     return true; // Indicate successful loading from file.
 }
 
@@ -416,12 +648,12 @@ bool ensureWiFiConnected(unsigned long timeout) {
  */
 void ledBlink() {
     // Sequence: OK -> OFF -> OK -> OFF -> OK -> OFF
-    led.setState(ALL_OK); delay(700);
-    led.setState(OFF); delay(500);
-    led.setState(ALL_OK); delay(700);
-    led.setState(OFF); delay(500);
-    led.setState(ALL_OK); delay(700);
-    led.setState(OFF); delay(500);
+    led.setState(ALL_OK); delay(350);
+    led.setState(OFF); delay(150);
+    led.setState(ALL_OK); delay(350);
+    led.setState(OFF); delay(150);
+    led.setState(ALL_OK); delay(350);
+    led.setState(OFF); delay(150);
 }
 
 /**
@@ -511,62 +743,56 @@ bool initializeSensors() {
  * (`readLightSensorWithRetry`, `readDHTSensorWithRetry`) and data sending
  * (`sendEnvironmentDataToServer`). It manages the LED status during the process
  * and returns an overall success/failure status for the entire environmental task.
+ * @param cfg A reference to the global Config structure.
+ * @param api_obj A reference to the global API object.
  * @return `true` if sensor data was successfully read AND successfully sent to the server.
  * `false` if either the sensor reading or the data sending failed.
  */
-bool readEnvironmentData() {
+bool readEnvironmentData(Config& cfg, API& api_obj) {
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("--- Reading Environment Sensors & Sending Data ---");
+        Serial.println(F("--- Reading Environment Sensors & Sending Data ---"));
     #endif
 
-    float lightLevel = -1.0f; // Initialize with an invalid value typical for light sensor errors
-    float temperature = NAN;  // Initialize with Not-a-Number for temp/humidity errors
-    float humidity = NAN;     // Initialize with Not-a-Number
+    float lightLevel = -1.0f;
+    float temperature = NAN;
+    float humidity = NAN;
 
-    led.setState(TAKING_DATA); // Set LED to indicate data acquisition phase.
-    delay(1000); // Short delay perhaps allowing sensors to stabilize further if needed.
+    led.setState(TAKING_DATA);
+    // delay(1000); // Optional
 
-    // Attempt to read sensors using helper functions that include retry logic.
     bool lightOK = readLightSensorWithRetry(lightLevel);
     bool dhtOK = readDHTSensorWithRetry(temperature, humidity);
 
-    // Check if all critical sensor readings were successful.
     if (!lightOK || !dhtOK) {
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("Error: Failed to read one or more environment sensors after retries.");
-            // Specific failure details should be logged within the retry functions if debug is enabled.
+            Serial.println(F("Error: Failed to read one or more environment sensors after retries."));
         #endif
-        // Set a generic data error state; let the user know something went wrong with data collection.
-        led.setState(ERROR_DATA);
-        delay(3000); // Display the error state briefly.
-        return false; // Indicate overall failure for the environmental data task.
+        led.setState(ERROR_SENSOR); // Changed from ERROR_DATA to be more specific
+        delay(1000);
+        String logUrl = api_obj.getBaseApiUrl() + cfg.apiLogPath;
+        ErrorLogger::sendLog(logUrl, api_obj.getAccessToken(), LOG_TYPE_ERROR, "Failed to read environment sensors.");
+        return false;
     }
 
-    // If all readings were successful, proceed to send the data.
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Environment sensors read successfully. Preparing to send...");
-        Serial.printf("  Read Values: Light=%.2f lx, Temperature=%.2f C, Humidity=%.2f %%\n", lightLevel, temperature, humidity);
+        Serial.println(F("Environment sensors read successfully. Preparing to send..."));
+        // Serial.printf("  Read Values: Light=%.2f lx, Temperature=%.2f C, Humidity=%.2f %%\n", lightLevel, temperature, humidity);
     #endif
 
-    // Attempt to send the collected data to the server using a helper function.
-    if (!sendEnvironmentDataToServer(lightLevel, temperature, humidity)) {
+    // Pass cfg and api_obj to sendEnvironmentDataToServer
+    if (!sendEnvironmentDataToServer(cfg, api_obj, lightLevel, temperature, humidity)) { 
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("Error: Failed to send environment data to the server.");
-            // Specific failure details should be logged within the sending function.
+            Serial.println(F("Error: Failed to send environment data to the server (handled in sendEnvironmentDataToServer)."));
         #endif
-        // LED state (ERROR_SEND) and delay should be handled within sendEnvironmentDataToServer.
-        return false; // Indicate overall failure for the environmental data task.
+        // LED state and logging are handled within sendEnvironmentDataToServer
+        return false;
     }
 
-    // If sending was also successful.
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Environment data sent successfully to the server.");
+        Serial.println(F("Environment data sent successfully to the server."));
     #endif
-    // Optionally set LED back to a neutral state like ALL_OK briefly before next task.
-    // led.setState(ALL_OK); delay(500);
-    return true; // Indicate overall success for the environmental data task.
+    return true;
 }
-
 
 /**
  * @brief Orchestrates capturing both thermal and visual images.
@@ -639,7 +865,6 @@ bool captureImages(uint8_t** jpegImage, size_t& jpegLength, float** thermalData)
     return true; // Indicate overall success for the image capture task.
 }
 
-
 /**
  * @brief Sends the captured thermal and visual image data to the server via multipart POST.
  * Uses the `MultipartDataSender` utility class to perform the HTTP request.
@@ -647,54 +872,80 @@ bool captureImages(uint8_t** jpegImage, size_t& jpegLength, float** thermalData)
  * @param jpegImage Pointer to the buffer containing the JPEG image data.
  * @param jpegLength Size of the JPEG image data in bytes.
  * @param thermalData Pointer to the buffer containing the thermal data (768 floats).
+ * @param cfg A reference to the global Config structure.
+ * @param api_obj A reference to the global API object.
  * @return `true` if the data was sent successfully (HTTP 2xx response received).
  * `false` otherwise (HTTP request failed or server returned error).
  */
-bool sendImageData(uint8_t* jpegImage, size_t jpegLength, float* thermalData) {
-    // Check for valid input pointers and length, though captureImages should ensure this if it returned true.
+bool sendImageData(Config& cfg, API& api_obj, uint8_t* jpegImage, size_t jpegLength, float* thermalData) { 
     if (!jpegImage || jpegLength == 0 || !thermalData) {
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("Error: Invalid data provided to sendImageData (null pointers or zero length).");
+            Serial.println(F("Error: Invalid data provided to sendImageData."));
         #endif
-        led.setState(ERROR_DATA); // Indicate a data problem
-        delay(3000);
+        led.setState(ERROR_DATA);
+        delay(1000);
         return false;
     }
 
+    led.setState(SENDING_DATA);
+    String fullUrl = api_obj.getBaseApiUrl() + cfg.apiCaptureDataPath;
+    String token = api_obj.getAccessToken();
+    String logUrl = api_obj.getBaseApiUrl() + cfg.apiLogPath;
+
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Preparing to send thermal and image data via HTTP POST (multipart)...");
-        Serial.println("Target URL: " + config.api_img);
+        Serial.println(F("  Preparing to send thermal and image data via HTTP POST (multipart)..."));
+        Serial.println("  Target URL: " + fullUrl);
     #endif
-    led.setState(SENDING_DATA); // Indicate data transmission phase.
-    delay(1000); // Optional short delay before sending.
+    // delay(1000); // Optional
 
-    // Call the static method from MultipartDataSender, using the API URL from config.
-    bool sendSuccess = MultipartDataSender::IOThermalAndImageData(
-        config.api_img,   // Target API endpoint URL from configuration
-        thermalData,      // Pointer to thermal data buffer
-        jpegImage,        // Pointer to JPEG image buffer
-        jpegLength        // Length of JPEG image data
-    );
+    int httpCode = MultipartDataSender::IOThermalAndImageData(fullUrl, token, thermalData, jpegImage, jpegLength);
 
-    // Check the result of the send operation.
-    if (!sendSuccess) {
+    if (httpCode == 200 || httpCode == 204) {
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("Error: HTTP POST request for image/thermal data failed.");
-            // More specific errors might be logged within MultipartDataSender if debug is enabled there.
+            Serial.println(F("  Image and thermal data sent successfully."));
         #endif
-        led.setState(ERROR_SEND); // Indicate a sending/communication error.
-        delay(3000);              // Show error state briefly.
-        // ErrorLogger::sendLog(String(API_LOGGING), "IMG_SEND_FAIL", "Image/Thermal data send failed"); // Example logging
-        return false; // Return failure status.
+        return true;
+    } else if (httpCode == 401 && api_obj.isActivated()) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("  Capture data send failed (401). Attempting token refresh..."));
+        #endif
+        ErrorLogger::sendLog(logUrl, token, LOG_TYPE_WARNING, "Capture data send returned 401. Attempting token refresh.");
+
+        int refreshHttpCode = api_obj.performTokenRefresh();
+        if (refreshHttpCode == 200) {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println(F("  Token refresh successful. Re-trying capture data send..."));
+            #endif
+             ErrorLogger::sendLog(logUrl, api_obj.getAccessToken(), LOG_TYPE_INFO, "Token refreshed successfully after capture data 401.");
+            token = api_obj.getAccessToken(); // Get new token
+            httpCode = MultipartDataSender::IOThermalAndImageData(fullUrl, token, thermalData, jpegImage, jpegLength);
+            if (httpCode == 200 || httpCode == 204) {
+                #ifdef ENABLE_DEBUG_SERIAL
+                    Serial.println(F("  Capture data sent successfully on retry."));
+                #endif
+                return true;
+            } else {
+                 #ifdef ENABLE_DEBUG_SERIAL
+                    Serial.printf("  Capture data send failed on retry. HTTP Code: %d\n", httpCode);
+                #endif
+                ErrorLogger::sendLog(logUrl, token, LOG_TYPE_ERROR, "Capture data send failed on retry after refresh. HTTP: " + String(httpCode));
+            }
+        } else {
+             #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("  Token refresh failed after 401. HTTP Code: %d\n", refreshHttpCode);
+            #endif
+            ErrorLogger::sendLog(logUrl, token, LOG_TYPE_ERROR, "Token refresh failed after capture data 401. Refresh HTTP: " + String(refreshHttpCode));
+        }
+    } else { // Other HTTP errors or client errors
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("  Error sending image/thermal data. HTTP Code: %d\n", httpCode);
+        #endif
+        ErrorLogger::sendLog(logUrl, token, LOG_TYPE_ERROR, "Failed to send capture data. HTTP Code: " + String(httpCode));
     }
 
-    // If sending was successful.
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Image and thermal data sent successfully via HTTP POST.");
-    #endif
-    // Optionally set LED back to OK briefly.
-    // led.setState(ALL_OK); delay(500);
-    return true; // Return success status.
+    led.setState(ERROR_SEND);
+    delay(1000);
+    return false;
 }
 
 /**
@@ -855,7 +1106,6 @@ bool initFilesystem() {
     return true; // Filesystem is ready.
 }
 
-
 /**
  * @brief Loads the application configuration and sets WiFi credentials.
  * Calls `loadConfiguration()` to populate the global `config` struct from
@@ -968,92 +1218,89 @@ bool handleWiFiConnection() {
  * Calls the `readEnvironmentData` function which handles the sub-steps (reading
  * with retries, sending data) and manages LED status for this task.
  * Logs the overall success or failure of the task.
+ * @param cfg A reference to the global Config structure.
+ * @param api_obj A reference to the global API object.
  * @return `true` if the environmental data task (read & send) completed successfully.
  * `false` otherwise.
  */
-bool performEnvironmentTasks() {
+bool performEnvironmentTasks(Config& cfg, API& api_obj, LEDStatus& status_led) { 
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("\n--- Performing Environment Data Tasks ---");
+        Serial.println(F("\n--- Performing Environment Data Tasks (Wrapper) ---"));
     #endif
 
-    // Call the function that orchestrates reading and sending.
-    if (!readEnvironmentData()) {
+    // Pass cfg and api_obj to readEnvironmentData
+    if (!readEnvironmentData(cfg, api_obj)) { 
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("Result: Environment Data Task FAILED.");
+            Serial.println(F("Result: Environment Data Task FAILED."));
         #endif
-        // Error LED state should be set within readEnvironmentData on failure.
-        return false; // Indicate task failure.
+        // Error LED and logging should be set within readEnvironmentData or sendEnvironmentDataToServer
+        return false;
     }
 
-    // If readEnvironmentData returned true.
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Result: Environment Data Task SUCCEEDED.");
+        Serial.println(F("Result: Environment Data Task SUCCEEDED."));
     #endif
-    return true; // Indicate task success.
+    return true;
 }
 
 /**
- * @brief Performs the image data task sequence: capturing images and sending data.
- * Calls `captureImages` to get thermal and visual data buffers, then calls
- * `sendImageData` to transmit them. Manages LED status updates during the process.
- * Note: Memory allocated by `captureImages` (pointed to by the output parameters)
- * MUST be freed later by `cleanupResources`.
- * @param[out] jpegImage Pointer to a `uint8_t*` variable in the caller (loop). On successful capture, this variable will be updated to point to the allocated JPEG buffer.
- * @param[out] jpegLength Reference to a `size_t` variable in the caller. On successful capture, this will be updated with the JPEG buffer size.
- * @param[out] thermalData Pointer to a `float*` variable in the caller. On successful capture, this variable will be updated to point to the allocated thermal data buffer.
- * @return `true` if both image capture AND data sending were successful.
- * `false` if either image capture failed OR data sending failed.
+ * @brief Captures images from the camera and thermal sensor, allocating buffers
+ * for the captured data. Calls `captureVisualJPEG()` and `captureAndCopyThermalData()`.
+ * Allocated buffers are passed back to the caller via output parameters.
+ * @param[out] jpegImage Pointer to a `uint8_t*` variable in the caller. On success,
+ * this will be updated to point to the allocated JPEG buffer. Set to `nullptr` on failure.
+ * @param[out] jpegLength Reference to a `size_t` variable in the caller. On success,
+ * this will be updated with the size (in bytes) of the captured JPEG image. Set to 0 on failure.
+ * @param[out] thermalData Pointer to a `float*` variable in the caller. On success,
+ * this will be updated to point to the allocated thermal data buffer. Set to `nullptr` on failure.
+ * @return `true` if both image capture and buffer allocation were successful.
+ * `false` otherwise (any capture or allocation failed).
  */
-bool performImageTasks(uint8_t** jpegImage, size_t& jpegLength, float** thermalData) {
+bool performImageTasks(Config& cfg, API& api_obj, LEDStatus& status_led, uint8_t** jpegImage, size_t& jpegLength, float** thermalData) { 
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("\n--- Performing Image Data Tasks ---");
+        Serial.println(F("\n--- Performing Image Data Tasks (Wrapper) ---"));
     #endif
-    // Note: jpegImage, jpegLength, thermalData are passed by reference/pointer
-    // so captureImages can update the caller's variables with buffer addresses/size.
 
-    // --- 1. Capture Images ---
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Task Step: Capture Images (Thermal & Visual)");
+        Serial.println(F("Task Step: Capture Images (Thermal & Visual)"));
     #endif
-    led.setState(TAKING_DATA); // Set LED for capture phase.
-    delay(1000); // Optional delay.
+    status_led.setState(TAKING_DATA);
+    // delay(1000); // Optional
 
-    if (!captureImages(jpegImage, jpegLength, thermalData)) {
+    if (!captureImages(jpegImage, jpegLength, thermalData)) { // captureImages remains unchanged in signature
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("Result: Image Task FAILED at Capture stage.");
+            Serial.println(F("Result: Image Task FAILED at Capture stage."));
         #endif
         // Error LED state and cleanup of partial captures handled within captureImages.
-        return false; // Indicate overall task failure.
+        // captureImages might need to log an error if it fails using ErrorLogger
+        String logUrl = api_obj.getBaseApiUrl() + cfg.apiLogPath;
+        ErrorLogger::sendLog(logUrl, api_obj.getAccessToken(), LOG_TYPE_ERROR, "Image capture failed.");
+        return false;
     }
-    // If capture succeeded, jpegImage and thermalData now point to allocated buffers.
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Task Step: Images captured successfully.");
+        Serial.println(F("Task Step: Images captured successfully."));
     #endif
+    status_led.setState(ALL_OK); // Brief OK after capture, before send
 
-    // --- 2. Send Image Data ---
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Task Step: Send Image Data");
+        Serial.println(F("Task Step: Send Image Data"));
     #endif
-    led.setState(SENDING_DATA); // Set LED for sending phase.
-    delay(1000); // Optional delay.
+    // status_led.setState(SENDING_DATA); // sendImageData will set this
+    // delay(1000); // Optional
 
-    // Pass the pointers to the allocated buffers to the sending function.
-    if (!sendImageData(*jpegImage, jpegLength, *thermalData)) {
+    // Pass cfg and api_obj to sendImageData
+    if (!sendImageData(cfg, api_obj, *jpegImage, jpegLength, *thermalData)) { // MODIFIED CALL
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("Result: Image Task FAILED at Send stage.");
+            Serial.println(F("Result: Image Task FAILED at Send stage."));
         #endif
-        // Error LED state handled within sendImageData.
-        // Note: We still need to free the buffers allocated in captureImages,
-        // which happens later in cleanupResources().
-        // Consider if data should be saved locally on send failure (future enhancement?).
-        return false; // Indicate overall task failure because sending failed.
+        // Error LED state and logging handled within sendImageData
+        return false;
     }
 
-    // If sending was also successful.
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Result: Image Task SUCCEEDED (Capture & Send).");
+        Serial.println(F("Result: Image Task SUCCEEDED (Capture & Send)."));
     #endif
-    return true; // Indicate overall task success.
+    return true;
 }
 
 /**
@@ -1192,49 +1439,74 @@ bool readDHTSensorWithRetry(float &temperature, float &humidity) {
  * @param lightLevel The light level value (float, lux) to send.
  * @param temperature The temperature value (float, degrees Celsius) to send.
  * @param humidity The relative humidity value (float, %) to send.
+ * @param cfg Reference to the global Config object containing API endpoint and path information.
+ * @param api_obj Reference to the global API object for managing access tokens and API interactions.
  * @return `true` if the data was sent successfully (server returned HTTP 2xx).
  * `false` otherwise (HTTP request failed or server returned an error).
  */
-bool sendEnvironmentDataToServer(float lightLevel, float temperature, float humidity) {
-    led.setState(SENDING_DATA); // Set LED to indicate data transmission phase.
+bool sendEnvironmentDataToServer(Config& cfg, API& api_obj, float lightLevel, float temperature, float humidity) { 
+    led.setState(SENDING_DATA);
+    String fullUrl = api_obj.getBaseApiUrl() + cfg.apiAmbientDataPath;
+    String token = api_obj.getAccessToken();
+    String logUrl = api_obj.getBaseApiUrl() + cfg.apiLogPath;
+
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println("  Sending environmental data via HTTP POST...");
-        Serial.println("  Target URL: " + config.api_env);
+        Serial.println("  Target URL: " + fullUrl);
     #endif
 
-    // Call the static method from EnvironmentDataJSON utility class.
-    // Use the API endpoint URL loaded from the configuration.
-    bool sendSuccess = EnvironmentDataJSON::IOEnvironmentData(
-        config.api_env, // API endpoint URL from config
-        lightLevel,
-        temperature,
-        humidity
-    );
+    int httpCode = EnvironmentDataJSON::IOEnvironmentData(fullUrl, token, lightLevel, temperature, humidity);
 
-    delay(1000); // Short delay after the sending attempt (optional).
-
-    // Check the result of the sending operation.
-    if (!sendSuccess) {
+    if (httpCode == 200 || httpCode == 204) { // 204 No Content is typical for successful POSTs without a body response
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("  Error: HTTP POST request for environmental data failed.");
-            // Specific errors might be logged within EnvironmentDataJSON if debug enabled there.
+            Serial.println(F("  Environmental data sent successfully."));
         #endif
-        led.setState(ERROR_SEND); // Set LED to indicate a sending/communication error.
-        delay(3000);              // Show the error state briefly.
-        // Optional: Log the error to a remote logging service if implemented.
-        // ErrorLogger::sendLog(String(API_LOGGING), "ENV_SEND_FAIL", "Environment data send failed");
-        return false; // Indicate sending failure.
+        // led.setState(ALL_OK); // Or let the main loop cycle handler do this
+        return true;
+    } else if (httpCode == 401 && api_obj.isActivated()) { // Token expired/invalid, and we are supposed to be active
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("  Env data send failed (401). Attempting token refresh..."));
+        #endif
+        ErrorLogger::sendLog(logUrl, token, LOG_TYPE_WARNING, "Env data send returned 401. Attempting token refresh.");
+        
+        int refreshHttpCode = api_obj.performTokenRefresh();
+        if (refreshHttpCode == 200) {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println(F("  Token refresh successful. Re-trying env data send..."));
+            #endif
+            ErrorLogger::sendLog(logUrl, api_obj.getAccessToken(), LOG_TYPE_INFO, "Token refreshed successfully after env data 401.");
+            token = api_obj.getAccessToken(); // Get the new token
+            httpCode = EnvironmentDataJSON::IOEnvironmentData(fullUrl, token, lightLevel, temperature, humidity);
+            if (httpCode == 200 || httpCode == 204) {
+                #ifdef ENABLE_DEBUG_SERIAL
+                    Serial.println(F("  Environmental data sent successfully on retry."));
+                #endif
+                return true;
+            } else {
+                 #ifdef ENABLE_DEBUG_SERIAL
+                    Serial.printf("  Env data send failed on retry. HTTP Code: %d\n", httpCode);
+                #endif
+                ErrorLogger::sendLog(logUrl, token, LOG_TYPE_ERROR, "Env data send failed on retry after refresh. HTTP: " + String(httpCode));
+            }
+        } else {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("  Token refresh failed after 401. HTTP Code: %d\n", refreshHttpCode);
+            #endif
+            // If refresh fails critically, api_obj.isActivated() might become false.
+            // The main loop's next apiReady check will catch this.
+             ErrorLogger::sendLog(logUrl, token, LOG_TYPE_ERROR, "Token refresh failed after env data 401. Refresh HTTP: " + String(refreshHttpCode));
+        }
+    } else { // Other HTTP errors or client errors from IOEnvironmentData
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("  Error sending environmental data. HTTP Code: %d\n", httpCode);
+        #endif
+         ErrorLogger::sendLog(logUrl, token, LOG_TYPE_ERROR, "Failed to send environmental data. HTTP Code: " + String(httpCode));
     }
 
-    // If sending was successful.
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("  Environmental data sent successfully via HTTP POST.");
-    #endif
-    // Optionally set LED back to a neutral state briefly before the next task.
-    // led.setState(ALL_OK); delay(500);
-    return true; // Indicate sending success.
+    led.setState(ERROR_SEND);
+    delay(1000); // Show error briefly
+    return false;
 }
-
 
 // =========================================================================
 // ===              IMAGE CAPTURE HELPER IMPLEMENTATIONS               ===
