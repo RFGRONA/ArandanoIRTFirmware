@@ -21,13 +21,15 @@ enum LEDState {
     ALL_OK,          ///< State: Everything OK / Idle. Color: White.
     OFF,             ///< State: LED explicitly turned off. Color: Off.
     ERROR_AUTH,      ///< State: Authentication error occurred. Color: Red.
-    ERROR_SEND,      ///< State: Error sending data via HTTP. Color: Yellow.
+    ERROR_SEND,      ///< State: Error sending data via HTTP. Color: Orange.
     ERROR_SENSOR,    ///< State: Error initializing or reading a sensor. Color: Purple.
     ERROR_DATA,      ///< State: Error processing or capturing data (e.g., image). Color: Cyan.
     TAKING_DATA,     ///< State: Currently performing measurements or capture. Color: Blue.
     SENDING_DATA,    ///< State: Currently sending data via HTTP. Color: Green.
-    CONNECTING_WIFI, ///< State: Attempting to connect to WiFi network. Color: Orange.
-    ERROR_WIFI       ///< State: Failed to connect to WiFi network. Color: Pink.
+    CONNECTING_WIFI, ///< State: Attempting to connect to WiFi network. Color: Yelow.
+    ERROR_WIFI,      ///< State: Failed to connect to WiFi network. Color: Pink.
+    TEMP_HIGH_FANS_ON,  ///< State: Internal temperature high, fans are ON. Color: Dark Orange/Amber. 
+    TEMP_NORMAL_FANS_OFF ///< State: Internal temperature normal, fans are OFF. Color: Light Blue. 
 };
 
 /**
@@ -66,8 +68,15 @@ public:
      */
     void turnOffAll();
 
+    /**
+     * @brief Retrieves the current logical state of the LED.
+     * @return The current state from the `LEDState` enum.
+     */
+    LEDState getCurrentState() const; 
+
 private:
     Adafruit_NeoPixel pixels; ///< @brief Instance of the Adafruit NeoPixel library.
+    LEDState _currentState;   ///< @brief Stores the current logical state of the LED. 
 
     /**
      * @brief Sets the raw RGB color of the NeoPixel LED.
