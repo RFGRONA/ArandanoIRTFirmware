@@ -107,29 +107,45 @@ uint8_t* OV2640Sensor::captureJPEG(size_t &length) {
     // 1. Acquire a framebuffer containing the captured image from the driver.
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
-        // Failed to get a framebuffer. Camera might be busy or disconnected.
-        // Serial.println("Camera capture failed: esp_camera_fb_get returned NULL.");
+#ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("[OV2640Sensor] CRITICAL: esp_camera_fb_get() returned NULL!");
+#endif
         return nullptr; // Return null pointer indicating failure.
     }
 
     // Check if the format is indeed JPEG (as configured in begin)
     if(fb->format != PIXFORMAT_JPEG){
-        // Serial.printf("Camera capture failed: Unexpected format %d, expected PIXFORMAT_JPEG\n", fb->format);
+#ifdef ENABLE_DEBUG_SERIAL
+        Serial.printf("[OV2640Sensor] Camera capture failed: Unexpected pixel format %d, expected PIXFORMAT_JPEG (%d).\n", fb->format, PIXFORMAT_JPEG);
+#endif
         esp_camera_fb_return(fb); // Return the incorrect buffer
         return nullptr;
     }
 
+#ifdef ENABLE_DEBUG_SERIAL
+    // fb is guaranteed to be non-NULL here if we passed the first check.
+    Serial.printf("[OV2640Sensor] Framebuffer obtained: Width %u, Height %u, Length %u bytes, Format %d.\n", fb->width, fb->height, fb->len, fb->format);
+    Serial.printf("[OV2640Sensor] Attempting to ps_malloc %u bytes for JPEG copy.\n", fb->len);
+    Serial.printf("[OV2640Sensor] Total Free PSRAM before malloc: %u bytes.\n", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    Serial.printf("[OV2640Sensor] Largest Free Contiguous PSRAM Block before malloc: %u bytes.\n", heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+#endif
+
     // 2. Allocate memory in PSRAM to store a copy of the JPEG data.
-    // Using ps_malloc ensures allocation in external PSRAM if available.
-    // The caller of captureJPEG is responsible for freeing this buffer later.
     uint8_t *jpegData = (uint8_t *)ps_malloc(fb->len);
     if (!jpegData) {
-        // Failed to allocate memory for the copy buffer. Likely out of PSRAM.
-        // Serial.printf("Camera capture failed: Failed to allocate %d bytes in PSRAM for JPEG copy.\n", fb->len);
+#ifdef ENABLE_DEBUG_SERIAL
+        Serial.printf("[OV2640Sensor] CRITICAL: Failed to allocate %u bytes in PSRAM for JPEG copy.\n", (unsigned int)fb->len); // Cast to unsigned int for %u with printf
+        Serial.printf("[OV2640Sensor] Total Free PSRAM at allocation failure: %u bytes.\n", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        Serial.printf("[OV2640Sensor] Largest Free Contiguous PSRAM Block at failure: %u bytes.\n", heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+#endif
         // IMPORTANT: Must return the original framebuffer to the driver even if allocation fails.
         esp_camera_fb_return(fb);
         return nullptr; // Return null pointer indicating failure.
     }
+
+#ifdef ENABLE_DEBUG_SERIAL
+    Serial.printf("[OV2640Sensor] Successfully allocated %u bytes for JPEG copy at 0x%X.\n", (unsigned int)fb->len, (uint32_t)jpegData);
+#endif
 
     // 3. Copy the JPEG data from the driver's buffer (fb->buf) to our new buffer (jpegData).
     memcpy(jpegData, fb->buf, fb->len);
@@ -137,10 +153,10 @@ uint8_t* OV2640Sensor::captureJPEG(size_t &length) {
 
     // 4. Return the driver's framebuffer buffer so it can be reused for future captures.
     // This is critical, otherwise the driver will run out of buffers.
+#ifdef ENABLE_DEBUG_SERIAL
+    Serial.printf("[OV2640Sensor] JPEG data copied. Returning original framebuffer (0x%X) to driver.\n", (uint32_t)fb);
+#endif
     esp_camera_fb_return(fb);
-
-    // Optional: Log success and image size.
-    // Serial.printf("Image captured successfully. Size: %d bytes. Buffer at: 0x%X\n", length, (uint32_t)jpegData);
 
     // 5. Return the pointer to the *copied* JPEG data buffer in PSRAM.
     return jpegData;
