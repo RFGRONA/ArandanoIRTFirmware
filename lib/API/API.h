@@ -22,6 +22,7 @@
 #define KEY_REFRESH_TOKEN "ref_token"
 #define KEY_DATA_COLLECTION_TIME "coll_time"
 #define KEY_IS_ACTIVATED "is_active"
+#define KEY_NVS_VALID_FLAG "nvs_ok" 
 
 // Default value for data collection time if not set by backend
 #define DEFAULT_DATA_COLLECTION_MINUTES 60
@@ -101,6 +102,19 @@ public:
      */
     int performTokenRefresh();
 
+    /**
+     * @brief Sets the device's MAC address.
+     * This MAC address will be used during the activation process.
+     * @param mac The MAC address of the device as a String.
+     */
+    void setDeviceMAC(const String& mac);
+
+    /**
+     * @brief Closes the Preferences (NVS) namespace.
+     * Should be called before entering deep sleep to ensure data is committed.
+     */
+    void closePreferences();
+
 private:
     Preferences _preferences; ///< Preferences instance for NVS operations.
 
@@ -115,6 +129,7 @@ private:
     String _refreshToken;
     int _dataCollectionTimeMinutes;
     bool _activatedFlag;
+    String _deviceMACAddress;
 
     /**
      * @brief Loads all persistent data items from NVS into member variables.

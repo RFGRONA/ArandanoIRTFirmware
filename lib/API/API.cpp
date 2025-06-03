@@ -16,7 +16,9 @@ API::API(const String& base_url, const String& activate_path, const String& auth
     _apiAuthPath(auth_path),
     _apiRefreshTokenPath(refresh_path),
     _dataCollectionTimeMinutes(DEFAULT_DATA_COLLECTION_MINUTES), // Initialize with default
-    _activatedFlag(false) { // Default to not activated
+    _activatedFlag(false), // Default to not activated
+    _deviceMACAddress("") // Initialize MAC address to empty
+    { 
     _preferences.begin(NVS_NAMESPACE, false); // false for read/write mode
     _loadPersistentData();
 }
@@ -29,19 +31,77 @@ API::~API() {
 }
 
 /**
+ * @brief Sets the device's MAC address.
+ * This MAC address will be used during the activation process.
+ * @param mac The MAC address of the device as a String.
+ */
+void API::setDeviceMAC(const String& mac) {
+    _deviceMACAddress = mac;
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.printf("[API] Device MAC address set to: %s\n", _deviceMACAddress.c_str());
+    #endif
+}
+
+/**
+ * @brief Closes the Preferences (NVS) namespace.
+ * Should be called before entering deep sleep to ensure data is committed.
+ */
+void API::closePreferences() { 
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("[API] Closing NVS preferences.");
+    #endif
+    _preferences.end();
+}
+
+/**
  * @brief Loads all persistent data items from NVS into member variables.
+ * Also checks for an NVS validity flag. If the flag is not present or false,
+ * it assumes NVS might be new or corrupted and resets activation-related data.
  */
 void API::_loadPersistentData() {
-    _accessToken = _preferences.getString(KEY_ACCESS_TOKEN, "");
-    _refreshToken = _preferences.getString(KEY_REFRESH_TOKEN, "");
-    _dataCollectionTimeMinutes = _preferences.getInt(KEY_DATA_COLLECTION_TIME, DEFAULT_DATA_COLLECTION_MINUTES);
-    _activatedFlag = _preferences.getBool(KEY_IS_ACTIVATED, false);
+    bool nvsIsValid = _preferences.getBool(KEY_NVS_VALID_FLAG, false);
 
-    // Ensure _dataCollectionTimeMinutes has a sane default if NVS was empty or had 0
+    if (!nvsIsValid) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("[API_Load] NVS validity flag not found or false. Assuming NVS is new or corrupted.");
+            Serial.println("[API_Load] Resetting activation status and tokens.");
+        #endif
+        // NVS is considered invalid or new, reset critical activation data
+        _accessToken = "";
+        _refreshToken = "";
+        _dataCollectionTimeMinutes = DEFAULT_DATA_COLLECTION_MINUTES;
+        _activatedFlag = false;
+        // Save this "clean slate" state to NVS immediately, including the valid flag
+        _saveAccessToken(_accessToken);
+        _saveRefreshToken(_refreshToken);
+        _saveDataCollectionTime(_dataCollectionTimeMinutes);
+        _saveActivationStatus(_activatedFlag); // This will also set the nvs_valid_flag to true
+    } else {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("[API_Load] NVS validity flag is true. Loading data normally.");
+        #endif
+        _accessToken = _preferences.getString(KEY_ACCESS_TOKEN, "");
+        _refreshToken = _preferences.getString(KEY_REFRESH_TOKEN, "");
+        _dataCollectionTimeMinutes = _preferences.getInt(KEY_DATA_COLLECTION_TIME, DEFAULT_DATA_COLLECTION_MINUTES);
+        _activatedFlag = _preferences.getBool(KEY_IS_ACTIVATED, false);
+    }
+
+    // Ensure _dataCollectionTimeMinutes has a sane default if NVS was empty or had 0,
+    // even if nvsIsValid was true but data was somehow bad.
     if (_dataCollectionTimeMinutes <= 0) {
         _dataCollectionTimeMinutes = DEFAULT_DATA_COLLECTION_MINUTES;
     }
+
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("[API] Persistent data loaded/validated from NVS.");
+        Serial.printf("[API]  - NVS Valid Flag was: %s\n", nvsIsValid ? "True" : "False (or missing)");
+        Serial.printf("[API]  - AccessToken: %s\n", _accessToken.isEmpty() ? "Empty" : (_accessToken.substring(0,5) + "...").c_str());
+        Serial.printf("[API]  - RefreshToken: %s\n", _refreshToken.isEmpty() ? "Empty" : (_refreshToken.substring(0,5) + "...").c_str());
+        Serial.printf("[API]  - DataCollectionTime: %d min\n", _dataCollectionTimeMinutes);
+        Serial.printf("[API]  - Activated: %s\n", _activatedFlag ? "Yes" : "No");
+    #endif
 }
+
 
 // --- NVS Save Methods ---
 void API::_saveAccessToken(const String& token) {
@@ -60,9 +120,18 @@ void API::_saveDataCollectionTime(int minutes) {
     _preferences.putInt(KEY_DATA_COLLECTION_TIME, _dataCollectionTimeMinutes);
 }
 
+/**
+ * @brief Saves the activation status to NVS and updates the member variable.
+ * Also saves an NVS validity flag to indicate that NVS has been written to correctly.
+ * @param activated The activation status (true or false).
+ */
 void API::_saveActivationStatus(bool activated) {
     _activatedFlag = activated;
     _preferences.putBool(KEY_IS_ACTIVATED, _activatedFlag);
+    _preferences.putBool(KEY_NVS_VALID_FLAG, true); // Mark NVS as valid after a state save
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.printf("[API_Save] Activation status saved: %s. NVS valid flag set to true.\n", _activatedFlag ? "Activated" : "Not Activated");
+    #endif
 }
 
 // --- Public Getter Methods ---
@@ -97,10 +166,12 @@ int API::_httpPost(const String& fullUrl, const String& authorizationToken, cons
         #endif
         return -100; // Custom error code for no WiFi
     }
-
+    
+    http.setReuse(false);
     if (http.begin(fullUrl)) {
         http.setTimeout(HTTP_REQUEST_TIMEOUT);
         http.addHeader("Content-Type", "application/json");
+        http.addHeader("Connection", "close");
         if (!authorizationToken.isEmpty()) {
             http.addHeader("Authorization", "Device " + authorizationToken);
         }
@@ -214,6 +285,17 @@ int API::performActivation(const String& deviceId, const String& activationCode)
     JsonDocument doc;
     doc["deviceId"] = deviceId.toInt(); // As per user story, DeviceId is int
     doc["activationCode"] = activationCode;
+    if (!_deviceMACAddress.isEmpty()) { 
+        doc["macAddress"] = _deviceMACAddress;
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[API_Activate] Including MAC Address in activation payload: %s\n", _deviceMACAddress.c_str());
+        #endif
+    } else {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("[API_Activate] MAC Address is empty, not including in activation payload.");
+        #endif
+    }
+
 
     String payload;
     serializeJson(doc, payload);
