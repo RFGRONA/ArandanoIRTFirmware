@@ -111,6 +111,13 @@ public:
      */
     void setCredentials(const String& ssid, const String& password);
 
+     /**
+     * @brief Retrieves the MAC address of the ESP32's WiFi station interface.
+     * @return The MAC address as a String (e.g., "AA:BB:CC:DD:EE:FF").
+     * Returns an empty string if WiFi is not properly initialized or MAC cannot be read.
+     */
+    String getMacAddress() const; //
+
 private:
     LEDStatus _led;                     ///< @brief Instance of LEDStatus for visual feedback of connection state.
     unsigned long _lastReconnectAttempt = 0; ///< @brief Timestamp (from millis()) of the last reconnection attempt or disconnect event. Used for timing intervals.

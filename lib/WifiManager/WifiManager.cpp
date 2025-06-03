@@ -309,3 +309,22 @@ void WiFiManager::setCredentials(const String& ssid, const String& password) {
         Serial.println("WiFiManager: Credentials set for SSID: " + _ssid);
      #endif
 }
+
+/**
+ * @brief Retrieves the MAC address of the ESP32's WiFi station interface.
+ * @return The MAC address as a String (e.g., "AA:BB:CC:DD:EE:FF").
+ * Returns an empty string if WiFi is not properly initialized or MAC cannot be read.
+ */
+String WiFiManager::getMacAddress() const { // <-- NUEVO MÉTODO
+    // Ensure WiFi is initialized enough to get a MAC address.
+    // WiFi.macAddress() can be called even if not connected.
+    // It returns a String directly.
+    String mac = WiFi.macAddress();
+    if (mac.isEmpty() || mac == "00:00:00:00:00:00") { // Check for invalid/empty MAC
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("[WiFiManager] Warning: Could not retrieve a valid MAC address.");
+        #endif
+        return ""; // Return empty string on failure
+    }
+    return mac;
+}
