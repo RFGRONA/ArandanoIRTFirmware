@@ -30,22 +30,26 @@ public:
      *
      * Constructs a JSON payload with the structure:
      * `{"logType": "TYPE_HERE", "logMessage": "Your message here"}`
-     * and sends it via HTTP POST to the given URL using an access token for authorization.
+     * Optionally includes `internalTemperature` and `internalHumidity` if valid values are provided.
+     * Sends it via HTTP POST to the given URL using an access token for authorization.
      * The caller is responsible for ensuring WiFi is connected and the accessToken is valid
      * before calling this method.
      *
      * @param fullLogUrl The complete URL (String) of the backend logging endpoint.
      * @param accessToken The access token (String) for `Authorization: Device <token>` header.
-     * If empty or null, the request might be sent without authorization,
-     * depending on server configuration (typically logs require auth).
+     * If empty, the request might be sent without authorization.
      * @param logType The type of log (e.g., "INFO", "WARNING", "ERROR"). Use the predefined
      * LOG_TYPE_INFO, LOG_TYPE_WARNING, LOG_TYPE_ERROR constants.
      * @param logMessage The detailed log message (String).
+     * @param internalTemp Optional. The internal temperature reading (float). Defaults to NAN.
+     * If NAN, this field will not be included in the JSON payload.
+     * @param internalHum Optional. The internal humidity reading (float). Defaults to NAN.
+     * If NAN, this field will not be included in the JSON payload.
      * @return `true` if the log message was successfully sent AND the server responded with an
      * HTTP 2xx status code. Returns `false` if the HTTP request fails, or if the server
      * responds with a non-2xx status code, or if essential parameters are missing.
      */
-    static bool sendLog(const String& fullLogUrl, const String& accessToken, const char* logType, const String& logMessage);
+    static bool sendLog(const String& fullLogUrl, const String& accessToken, const char* logType, const String& logMessage, float internalTemp = NAN, float internalHum = NAN);
 };
 
 #endif // ERRORLOGGER_H
