@@ -57,9 +57,11 @@ int EnvironmentDataJSON::IOEnvironmentData(
         Serial.printf("[EnvDataJSON] Payload: %s\n", jsonPayload.c_str());
     #endif
 
+    http.setReuse(false);
     if (http.begin(fullEnvDataUrl)) { // For HTTP. For HTTPS, use WiFiClientSecure.
         http.setTimeout(ENV_DATA_HTTP_REQUEST_TIMEOUT);
         http.addHeader("Content-Type", "application/json");
+        http.addHeader("Connection", "close");
         if (!accessToken.isEmpty()) {
             http.addHeader("Authorization", "Device " + accessToken);
         } else {

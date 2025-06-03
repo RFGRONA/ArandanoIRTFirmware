@@ -254,8 +254,10 @@
       Serial.printf("  Payload Size: %d bytes\n", (int)payload.size());
     #endif
 
+    http.setReuse(false);
     if (http.begin(apiUrl)) { // For HTTP. For HTTPS, use WiFiClientSecure.
         http.setTimeout(CAPTURE_DATA_HTTP_REQUEST_TIMEOUT);
+        http.addHeader("Connection", "close");
         http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
 
         if (!accessToken.isEmpty()) {
