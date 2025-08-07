@@ -3,57 +3,113 @@
  * @brief Implements the MLX90640Sensor wrapper class methods.
  */
 #include "MLX90640Sensor.h"
-#include <math.h> // Potentially needed for isnan, although MLX library might not return NaN.
 
-// Constructor implementation - Initializes the TwoWire reference and zero-initializes the frame buffer.
+// --- Configuration for Temporal Averaging ---
+// Define the number of frames to average for noise reduction.
+// Set to 1 to disable averaging and perform a single read.
+#define NUM_SAMPLES_TO_AVERAGE 6
+
+// Define the delay between samples in milliseconds.
+// This should be based on the sensor's refresh rate.
+// For 0.5Hz, the period is 2000ms. A small margin is added.
+#define INTER_SAMPLE_DELAY_MS 2500
+
+
+// Constructor: Initializes the TwoWire reference.
 MLX90640Sensor::MLX90640Sensor(TwoWire &wire) : _wire(wire), frame{} {
     // The Adafruit_MLX90640 'mlx' object is implicitly default-constructed here.
-    // The 'frame' buffer is allocated (e.g., on stack if object is local, or in static memory if global).
-    // Using frame{} ensures the buffer starts zeroed, which can be helpful for debugging.
 }
 
-// Initializes the sensor communication and sets operating parameters using the Adafruit library.
+// Initializes the sensor communication and sets operating parameters.
 bool MLX90640Sensor::begin() {
-    // Attempt to initialize the Adafruit_MLX90640 library object using the default
-    // I2C address (0x33) and the provided TwoWire instance (e.g., Wire or Wire1).
     if (!mlx.begin(MLX90640_I2CADDR_DEFAULT, &_wire)) {
-        // Optional: Log failure to the Serial monitor for debugging.
-        // Serial.println("Failed to initialize MLX90640 sensor. Check wiring and I2C address.");
-        return false; // Return false if library initialization fails.
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[MLX90640] Failed to initialize sensor. Check wiring and I2C address."));
+        #endif
+        return false;
     }
-    // Optional: Log success for debugging.
-    // Serial.println("MLX90640 Initialized Successfully");
 
-    // Configure sensor parameters after successful initialization.
-    mlx.setMode(MLX90640_CHESS);       // Set readout pattern (Chess recommended for faster readout).
-    mlx.setResolution(MLX90640_ADC_18BIT); // Set ADC resolution (higher means less noise, slower).
-    mlx.setRefreshRate(MLX90640_0_5_HZ); // Set refresh rate (lower rate means less noise).
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[MLX90640] Initialized Successfully."));
+    #endif
 
-    // IMPORTANT NOTE (documented in .h): A delay must be added *after* calling this begin()
-    // function in the main sketch (e.g., in setup()) before the first readFrame() call
-    // to allow the sensor time for its first measurement cycle (e.g., >1s for 0.5Hz).
+    // Configure sensor parameters for best noise performance.
+    mlx.setMode(MLX90640_CHESS);
+    mlx.setResolution(MLX90640_ADC_18BIT);
+    mlx.setRefreshRate(MLX90640_0_5_HZ);
 
-    return true; // Return true indicating successful initialization and configuration.
+    return true;
 }
 
-// Reads a complete frame of thermal data (768 pixels) into the internal 'frame' buffer.
+/**
+ * @brief Reads a thermal data frame, averaging multiple samples for better accuracy.
+ *
+ * This function performs temporal averaging to reduce noise. It captures a configurable
+ * number of frames (NUM_SAMPLES_TO_AVERAGE), waiting for the sensor's refresh cycle
+ * between each capture, and calculates the average temperature for each pixel.
+ * The final averaged result is stored in the internal 'frame' buffer.
+ *
+ * @return True if the averaged frame was read successfully, false otherwise.
+ */
 bool MLX90640Sensor::readFrame() {
-    // Call the Adafruit library function to get a complete frame.
-    // The library handles reading subpages and calculating temperatures internally.
-    // It returns 0 on success, or a non-zero error code on failure.
-    if (mlx.getFrame(frame) != 0) {
-        // Optional: Log frame read failure for debugging.
-        // Serial.println("Failed to read frame from MLX90640");
-        return false; // Frame read failed.
+    // If averaging is disabled (samples <= 1), perform a single, standard read.
+    if (NUM_SAMPLES_TO_AVERAGE <= 1) {
+        return (mlx.getFrame(frame) == 0);
     }
-    // Optional: Add short delay if needed between reads, although library might handle timing.
-    // delay(50);
-    return true; // Frame read successfully into the 'frame' buffer.
+
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.printf("[MLX90640] Starting thermal frame averaging (%d samples)...\n", NUM_SAMPLES_TO_AVERAGE);
+    #endif
+
+    // Temporary buffer to store each individual frame reading.
+    // This is allocated on the stack. 768 * 4 bytes = 3KB, which is safe for ESP32.
+    float tempFrame[768];
+
+    // Step 1: Clear the main 'frame' buffer to use it as an accumulator.
+    for (int i = 0; i < 768; i++) {
+        frame[i] = 0.0f;
+    }
+
+    // Step 2: Acquire and accumulate multiple samples.
+    for (uint8_t s = 0; s < NUM_SAMPLES_TO_AVERAGE; s++) {
+        // For the first sample (s=0), we don't wait. For subsequent samples,
+        // we wait for the sensor's refresh period to get new data.
+        if (s > 0) {
+            delay(INTER_SAMPLE_DELAY_MS);
+        }
+
+        // Attempt to read a single frame into the temporary buffer.
+        if (mlx.getFrame(tempFrame) != 0) {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[MLX90640] ERROR: Failed to read sample %d/%d.\n", s + 1, NUM_SAMPLES_TO_AVERAGE);
+            #endif
+            return false; // Abort the entire process if any single read fails.
+        }
+
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[MLX90640]   - Sample %d/%d read successfully.\n", s + 1, NUM_SAMPLES_TO_AVERAGE);
+        #endif
+
+        // Accumulate the values from the temporary frame into our main buffer.
+        for (int i = 0; i < 768; i++) {
+            frame[i] += tempFrame[i];
+        }
+    }
+
+    // Step 3: Calculate the final average for each pixel.
+    for (int i = 0; i < 768; i++) {
+        frame[i] /= NUM_SAMPLES_TO_AVERAGE;
+    }
+
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[MLX90640] Frame averaging complete. Final data is ready."));
+    #endif
+
+    return true; // Return true indicating success.
 }
 
 // Returns a direct pointer to the internal buffer holding the last read frame data.
 float* MLX90640Sensor::getThermalData() {
-    // The caller receives a pointer to the internal 'frame' array.
-    // The validity of the data depends on the success of the last 'readFrame()' call.
+    // The data pointed to is the result of the last successful readFrame() call.
     return frame;
 }
