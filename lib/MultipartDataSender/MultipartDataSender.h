@@ -27,6 +27,12 @@
  */
 class MultipartDataSender {
 public:
+
+    // --- Constants ---
+    static const int THERMAL_WIDTH = 32; ///< Width of the thermal sensor array.
+    static const int THERMAL_HEIGHT = 24; ///< Height of the thermal sensor array.
+    static const int THERMAL_PIXELS = THERMAL_WIDTH * THERMAL_HEIGHT; ///< Total number of thermal sensor pixels.
+
     /**
      * @brief Sends thermal sensor data and a JPEG image via HTTP POST using multipart/form-data encoding.
      *
@@ -55,11 +61,6 @@ public:
         uint8_t* jpegImage,
         size_t jpegLength
     );
-private:
-    // --- Constants ---
-    static const int THERMAL_WIDTH = 32; ///< Width of the thermal sensor array.
-    static const int THERMAL_HEIGHT = 24; ///< Height of the thermal sensor array.
-    static const int THERMAL_PIXELS = THERMAL_WIDTH * THERMAL_HEIGHT; ///< Total number of thermal sensor pixels.
 
     /**
      * @brief Creates a JSON object string containing thermal statistics and the raw data array.
@@ -68,6 +69,35 @@ private:
      * @return String containing the formatted JSON payload. Returns an empty string on allocation or calculation failure.
      */
     static String createThermalJson(float* thermalData);
+
+
+    // --- Thermal Data Calculation Helpers ---
+
+    /**
+     * @brief Calculates the maximum temperature from the thermal data array.
+     * Ignores NaN values during calculation.
+     * @param thermalData Pointer to the float array (THERMAL_PIXELS elements) of temperatures.
+     * @return The maximum valid temperature found in the array. Returns -INFINITY if all values are NaN or the array is empty/invalid.
+     */
+    static float calculateMaxTemperature(float* thermalData);
+
+    /**
+     * @brief Calculates the minimum temperature from the thermal data array.
+     * Ignores NaN values during calculation.
+     * @param thermalData Pointer to the float array (THERMAL_PIXELS elements) of temperatures.
+     * @return The minimum valid temperature found in the array. Returns INFINITY if all values are NaN or the array is empty/invalid.
+     */
+    static float calculateMinTemperature(float* thermalData);
+
+    /**
+     * @brief Calculates the average temperature from the thermal data array.
+     * Ignores NaN values during calculation. The average is calculated based on the count of valid (non-NaN) pixels.
+     * @param thermalData Pointer to the float array (THERMAL_PIXELS elements) of temperatures.
+     * @return The average temperature of valid pixels. Returns NAN if all values are NaN or the array is empty/invalid.
+     */
+    static float calculateAverageTemperature(float* thermalData);
+
+private:
 
     /**
      * @brief Constructs the complete multipart/form-data payload as a byte vector.
@@ -95,32 +125,6 @@ private:
         const String& boundary,
         const std::vector<uint8_t>& payload
     );
-
-    // --- Thermal Data Calculation Helpers ---
-
-    /**
-     * @brief Calculates the maximum temperature from the thermal data array.
-     * Ignores NaN values during calculation.
-     * @param thermalData Pointer to the float array (THERMAL_PIXELS elements) of temperatures.
-     * @return The maximum valid temperature found in the array. Returns -INFINITY if all values are NaN or the array is empty/invalid.
-     */
-    static float calculateMaxTemperature(float* thermalData);
-
-    /**
-     * @brief Calculates the minimum temperature from the thermal data array.
-     * Ignores NaN values during calculation.
-     * @param thermalData Pointer to the float array (THERMAL_PIXELS elements) of temperatures.
-     * @return The minimum valid temperature found in the array. Returns INFINITY if all values are NaN or the array is empty/invalid.
-     */
-    static float calculateMinTemperature(float* thermalData);
-
-    /**
-     * @brief Calculates the average temperature from the thermal data array.
-     * Ignores NaN values during calculation. The average is calculated based on the count of valid (non-NaN) pixels.
-     * @param thermalData Pointer to the float array (THERMAL_PIXELS elements) of temperatures.
-     * @return The average temperature of valid pixels. Returns NAN if all values are NaN or the array is empty/invalid.
-     */
-    static float calculateAverageTemperature(float* thermalData);
 
 };
 
