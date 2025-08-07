@@ -10,5 +10,5 @@
     "api_log_path": "/api/endpoint",
     "api_ambient_data_path": "/api/endpoint",
     "api_capture_data_path": "/api/endpoint",
-    "sleep_sec": 60
+    "data_interval_minutes": 5
 }
