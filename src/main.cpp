@@ -1,968 +1,431 @@
+// src/main.cpp
 /**
  * @file main.cpp
- * @brief Main application firmware for ESP32-S3 based environmental and plant monitoring device.
+ * @brief Main application firmware for an ESP32-S3 based environmental and plant monitoring device.
  *
- * This firmware initializes various sensors (DHT22, BH1750, MLX90640, OV2640),
- * loads configuration from LittleFS, connects to WiFi using loaded credentials,
- * periodically reads sensor data, captures thermal and visual images,
- * sends the data to configured API endpoints, and enters deep sleep between cycles.
- * Includes status indication via a WS2812 LED and optional serial debugging.
+ * This firmware initializes various sensors, loads configuration, connects to WiFi,
+ * periodically collects and sends data, manages internal temperature via fans,
+ * and enters deep sleep. It utilizes modularized functions for better organization.
  */
 
 // --- Core Arduino and System Includes ---
 #include <Arduino.h>
-#include <Wire.h>            // Required for I2C communication
-#include "esp_heap_caps.h" // Required for memory checking/allocation (e.g., ps_malloc)
-#include "esp_sleep.h"       // Required for deep sleep functions
+#include "esp_sleep.h"
 
-// --- Filesystem & JSON Includes ---
-#include <FS.h>              // Filesystem base class
-#include <LittleFS.h>        // LittleFS filesystem implementation
-#include <ArduinoJson.h>     // JSON parsing/serialization
-
-// --- Optional Debugging ---
-// Uncomment the following line to enable Serial output for debugging
-// #define ENABLE_DEBUG_SERIAL
-// --------------------------
-
-// --- Local Libraries ---
+// --- Local Libraries (Project Specific Classes from lib/) ---
 #include "DHT22Sensor.h"
 #include "BH1750Sensor.h"
 #include "MLX90640Sensor.h"
 #include "OV2640Sensor.h"
 #include "LEDStatus.h"
-#include "EnvironmentDataJSON.h"
-#include "MultipartDataSender.h"
 #include "WiFiManager.h"
-// #include "ErrorLogger.h" // Commented out (backend not ready)
-// #include "API.h"          // Commented out (backend not ready)
+#include "API.h"
+#include "DHT11Sensor.h"
+#include "ErrorLogger.h"
 
-// --- Pin Definitions ---
-#define I2C_SDA 47   ///< GPIO pin for I2C SDA line
-#define I2C_SCL 21   ///< GPIO pin for I2C SCL line
-#define DHT_PIN 14   ///< GPIO pin for DHT22 data line
+// --- New Modularized Helper Files (from src/) ---
+#include "ConfigManager.h"
+#include "SystemInit.h"
+#include "CycleController.h"
+#include "EnvironmentTasks.h"
+#include "ImageTasks.h"
+#include "FanController.h"  // For fan control
 
-// --- General Configuration (Defaults & Constants) ---
-#define SENSOR_READ_RETRIES 3     ///< Number of attempts to read sensor data if initial read fails.
-#define WIFI_CONNECT_TIMEOUT_MS 20000 ///< Timeout (in milliseconds) for establishing WiFi connection.
-#define CONFIG_FILENAME "/config.json" ///< Filename for configuration on LittleFS
+// --- Hardware Pin Definitions ---
+#define I2C_SDA_PIN 47
+#define I2C_SCL_PIN 21
+#define DHT_EXTERNAL_PIN 14     // External DHT22 sensor pin
+#define DHT11_INTERNAL_PIN 41   // Internal DHT11 sensor pin
+#define FAN_RELAY_PIN 42        // Relay control pin for fans
 
-// --- Configuration Structure ---
-/**
- * @brief Holds application configuration loaded from LittleFS or defaults.
- */
-struct Config {
-    String wifi_ssid = "DEFAULT_SSID"; ///< Default WiFi SSID if config load fails.
-    String wifi_pass = "";             ///< Default WiFi Password.
-    String api_env = "";               ///< Default Environmental API URL.
-    String api_img = "";               ///< Default Image API URL.
-    int sleep_sec = 60;                ///< Default sleep duration in seconds.
-};
-Config config; // Global configuration object
-// -----------------------------
-
-// --- I2C Bus Instance ---
-// Using the default Wire object. Pins are set in Wire.begin().
+// --- Sleep Durations & Delays ---
+#define FAN_ON_ACTIVE_MONITOR_DELAY_MS 5000 // 5 seconds between temp checks when fans are actively cooling
+#define MIN_SLEEP_S 15                        // Minimum sleep duration to prevent rapid loops
 
 // --- Global Object Instances ---
-BH1750Sensor lightSensor(Wire, I2C_SDA, I2C_SCL); ///< Light sensor object using default Wire.
-MLX90640Sensor thermalSensor(Wire);               ///< Thermal camera object using default Wire.
-DHT22Sensor dhtSensor(DHT_PIN);                   ///< Temperature/Humidity sensor object.
-OV2640Sensor camera;                              ///< Visual camera object.
-LEDStatus led;                                    ///< Status LED object.
-WiFiManager wifiManager;                          ///< WiFi connection manager object (constructor now takes no args).
-// ErrorLogger errorLogger;                       ///< Error logger object (commented out for now).
+// 'config' is defined in ConfigManager.cpp and declared extern in ConfigManager.h
 
-// --- Function Prototypes ---
-bool loadConfiguration(const char *filename);
-void ledBlink();
-bool initializeSensors();
-bool readEnvironmentData();
-bool captureImages(uint8_t** jpegImage, size_t& jpegLength, float** thermalData);
-bool sendImageData(uint8_t* jpegImage, size_t jpegLength, float* thermalData);
-void deepSleep(unsigned long seconds);
-void cleanupResources(uint8_t* jpegImage, float* thermalData);
-bool ensureWiFiConnected(unsigned long timeout);
+BH1750Sensor lightSensor(Wire);
+MLX90640Sensor thermalSensor(Wire);
+DHT22Sensor dhtExternalSensor(DHT_EXTERNAL_PIN);
+OV2640Sensor camera;
+LEDStatus led;
+WiFiManager wifiManager;
+API* api_comm = nullptr;
 
-// --- Helper Function Prototypes for Setup ---
-void initSerial();
-void initLED();
-bool initFilesystem();
-void loadConfigAndSetCredentials();
-void handleSensorInitFailure();
-// --- Helper Function Prototypes for Sensor Init ---
-bool initDHTSensor();
-bool initI2C();
-bool initLightSensor();
-bool initThermalSensor();
-bool initCameraSensor();
+DHT11Sensor dhtInternalSensor(DHT11_INTERNAL_PIN);
+FanController fanController(FAN_RELAY_PIN, false);
 
-// --- Helper Function Prototypes for Loop ---
-bool handleWiFiConnection();
-bool performEnvironmentTasks();
-bool performImageTasks(uint8_t** jpegImage, size_t& jpegLength, float** thermalData);
-void prepareForSleep(bool cycleStatusOK);
+// --- RTC Data for Sleep Management ---
+RTC_DATA_ATTR uint32_t nextMainDataCollectionDueTimeS_RTC = 0;
 
-// --- Helper Function Prototypes for Environment Task ---
-bool readLightSensorWithRetry(float &lightLevel);
-bool readDHTSensorWithRetry(float &temperature, float &humidity);
-bool sendEnvironmentDataToServer(float lightLevel, float temperature, float humidity);
-
-// --- Helper Function Prototypes for Image Capture ---
-bool captureAndCopyThermalData(float** thermalDataBuffer);
-bool captureVisualJPEG(uint8_t** jpegImageBuffer, size_t& jpegLength);
+// --- State Variables for Active Ventilation (Non-RTC, reset on each boot) ---
+bool activeVentilationInProgress = false;
+uint32_t ventilationStartUptimeS = 0;
 
 // =========================================================================
-// ===                          SETUP FUNCTION                           ===
+// ===                           SETUP FUNCTION                          ===
 // =========================================================================
-/**
- * @brief Setup function, runs once on power-on or reset (including wake from deep sleep).
- * Initializes Serial (if debugging enabled), LED, LittleFS, loads configuration,
- * sets WiFi credentials, initializes sensors.
- * Enters deep sleep immediately if LittleFS mount or sensor initialization fails.
- */
 void setup() {
-  // Initialize LED first for early visual feedback
-  initLED();
+    led.begin();
+    led.setState(ALL_OK);
 
-  // Initialize Serial port for debugging if enabled
-  initSerial();
+    initSerial_Sys(); // Inicializa Serial para debug
 
-  // Initialize LittleFS filesystem, halt on critical failure
-  if (!initFilesystem()) {
-      // Specific error LED state might be set inside initFilesystem
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("CRITICAL: Halting due to filesystem error.");
-      #endif
-      while(1) { delay(1000); } // Halt execution
-  }
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[MainSetup] Initializing Filesystem..."));
+    #endif
+    if (!initFilesystem()) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[MainSetup] CRITICAL: Filesystem initialization failed. Halting."));
+        #endif
+        led.setState(ERROR_DATA);
+        while(1) { delay(1000); }
+    }
 
-  // Load configuration from file and set WiFi credentials
-  loadConfigAndSetCredentials();
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[MainSetup] Loading configuration..."));
+    #endif
+    loadConfigurationFromFile();
 
-  // Initialize all sensors using the refactored function
-  if (!initializeSensors()) {
-       handleSensorInitFailure(); // Handles error LED and deep sleep logic
-       // Execution stops in handleSensorInitFailure if it enters deep sleep
-  }
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("[MainSetup] Setting WiFi credentials in WiFiManager for SSID: " + config.wifi_ssid);
+    #endif
+    wifiManager.setCredentials(config.wifi_ssid, config.wifi_pass);
 
-  // Setup completed successfully
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Setup complete. Initial LED state OK.");
-    Serial.println("--------------------------------------");
-  #endif
-  led.setState(ALL_OK); // Ensure final OK state for setup
-  delay(1000);          // Brief delay showing OK status
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[MainSetup] Initializing API communication object..."));
+    #endif
+    api_comm = new API(config.apiBaseUrl,
+                       config.apiActivatePath,
+                       config.apiAuthPath,
+                       config.apiRefreshTokenPath);
+    if (api_comm == nullptr) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[MainSetup] CRITICAL: Failed to allocate memory for API object. Halting."));
+        #endif
+        led.setState(ERROR_AUTH);
+        while(1) { delay(1000); }
+    }
+
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[MainSetup] Obtaining MAC Address..."));
+    #endif
+    String macAddr = wifiManager.getMacAddress();
+    if (!macAddr.isEmpty()) {
+        api_comm->setDeviceMAC(macAddr);
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[MainSetup] MAC Address %s set in API object.\n", macAddr.c_str());
+        #endif
+    } else {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[MainSetup] WARNING: Could not obtain MAC address."));
+        #endif
+    }
+
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[MainSetup] Initializing WiFiManager..."));
+    #endif
+    wifiManager.begin();
+
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[MainSetup] Initializing Internal DHT11 Sensor..."));
+    #endif
+    dhtInternalSensor.begin();
+
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[MainSetup] Initializing Fan Controller..."));
+    #endif
+    fanController.begin();
+
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[MainSetup] Initializing I2C bus..."));
+    #endif
+    initI2C_Sys(I2C_SDA_PIN, I2C_SCL_PIN);
+
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[MainSetup] Initializing external sensors..."));
+    #endif
+    if (!initializeSensors_Sys(dhtExternalSensor, lightSensor, thermalSensor, camera)) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[MainSetup] External sensor initialization failed."));
+        #endif
+        led.setState(ERROR_SENSOR);
+        handleSensorInitFailure_Sys(config.sleep_sec); 
+    }
+
+    if (nextMainDataCollectionDueTimeS_RTC == 0) {
+         #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[MainSetup] RTC target for sleep calc (nextMainDataCollectionDueTimeS_RTC) is 0 (first boot)."));
+         #endif
+    }
+
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("--------------------------------------"));
+        Serial.println(F("[MainSetup] Device setup completed successfully."));
+        Serial.println(F("--------------------------------------"));
+    #endif
+    led.setState(ALL_OK);
+    delay(1000);
 }
 
 // =========================================================================
-// ===                           MAIN LOOP                               ===
+// ===                            MAIN LOOP                              ===
 // =========================================================================
-/**
- * @brief Main loop function, runs repeatedly after setup.
- * Orchestrates the main workflow: WiFi, environment tasks, image tasks, cleanup, sleep.
- */
 void loop() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("\n--- Starting Loop Cycle ---");
-  #endif
+    unsigned long cycleStartTimeMs = millis();
+    uint32_t currentDeviceUptimeS = esp_timer_get_time() / 1000000ULL;
+    uint32_t awakeTimeThisCycleS = 0;
+    bool cycleStatusOK = true; 
 
-  // Indicate Start of Cycle
-  ledBlink();
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("\n======================================"));
+        Serial.printf("--- Starting New Cycle (Uptime: %u s) ---\n", currentDeviceUptimeS);
+        Serial.printf("[MainLoopStart] Total Free PSRAM: %u bytes.\n", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        Serial.printf("[MainLoopStart] Largest Free Contiguous PSRAM Block: %u bytes.\n", heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    #endif
 
-  // Track overall success of the cycle
-  bool everythingOK = true;
+    // --- Main Data Collection Decision ---
+    bool performMainDataTasksThisCycle = false;
+    esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
 
-  // 1. Handle WiFi Connection (includes sleep on failure)
-  if (!handleWiFiConnection()) {
-      return; // Exit loop early if WiFi failed (already going to sleep)
-  }
-
-  // 2. Perform Environmental Data Task
-  if (!performEnvironmentTasks()) {
-      everythingOK = false; // Mark cycle as having errors
-  }
-
-  // 3. Perform Image Task (Capture, Send/Save)
-  // Declare pointers here so they are in scope for cleanupResources
-  uint8_t* jpegImage = nullptr;
-  size_t jpegLength = 0;
-  float* thermalData = nullptr;
-  // Only attempt image tasks if previous steps were generally OK
-  if (everythingOK) {
-      if (!performImageTasks(&jpegImage, jpegLength, &thermalData)) {
-          everythingOK = false; // Mark cycle as having errors
-      }
-  }
-
-  // 4. Cleanup Resources (Memory buffers and Camera peripheral)
-  // Pass the pointers, even if null, to the cleanup function.
-  cleanupResources(jpegImage, thermalData);
-
-  // 5. Prepare for Sleep (Final LED status, blink, unmount FS)
-  prepareForSleep(everythingOK);
-
-  // 6. Enter Deep Sleep
-  deepSleep(config.sleep_sec);
-}
-
-
-// =========================================================================
-// ===                      HELPER FUNCTIONS                           ===
-// =========================================================================
-
-/**
- * @brief Loads configuration from a JSON file on LittleFS.
- * Populates the global 'config' struct. Uses defaults if file not found or parsing fails.
- * @param filename The path to the configuration file (e.g., "/config.json").
- * @return True if the configuration was loaded successfully from the file, False otherwise.
- */
-bool loadConfiguration(const char *filename) {
-    File configFile = LittleFS.open(filename, "r");
-    if (!configFile) {
+    if (wakeup_cause == ESP_SLEEP_WAKEUP_TIMER) {
+        performMainDataTasksThisCycle = true;
         #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Failed to open config file: " + String(filename));
+            Serial.println(F("[MainLoop] Woke up by timer, data collection is due."));
         #endif
-        return false; // Indicate failure to open file
-    }
-
-    // Allocate a JsonDocument (adjust size if config becomes larger)
-    // Use https://arduinojson.org/v6/assistant/ to estimate size
-    JsonDocument doc;
-    // For ESP32, dynamic allocation usually works well.
-    // If memory becomes an issue, consider StaticJsonDocument with calculated capacity.
-
-    // Parse the JSON file content
-    DeserializationError error = deserializeJson(doc, configFile);
-    configFile.close(); // Close the file promptly
-
-    if (error) {
+    } else if (wakeup_cause == ESP_SLEEP_WAKEUP_UNDEFINED && nextMainDataCollectionDueTimeS_RTC == 0) {
+        performMainDataTasksThisCycle = true;
         #ifdef ENABLE_DEBUG_SERIAL
-        Serial.print("Failed to parse config file: ");
-        Serial.println(error.c_str());
+            Serial.println(F("[MainLoop] First boot or non-deep-sleep reset (RTC=0), performing data collection."));
         #endif
-        return false; // Indicate parsing failure
-    }
-
-    // Extract values, using defaults if keys are missing or null
-    // Operator | provides default value if doc["key"] is null or missing
-    config.wifi_ssid = doc["wifi_ssid"] | String("DEFAULT_SSID");
-    config.wifi_pass = doc["wifi_pass"] | String("");
-    config.api_env = doc["api_env"] | String("");
-    config.api_img = doc["api_img"] | String("");
-    config.sleep_sec = doc["sleep_sec"] | 60;
-
-    #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Configuration loaded successfully:");
-    Serial.println("  WiFi SSID: " + config.wifi_ssid);
-    Serial.println("  WiFi Pass: ********"); // Avoid printing password
-    Serial.println("  API Env: " + config.api_env);
-    Serial.println("  API Img: " + config.api_img);
-    Serial.println("  Sleep Sec: " + String(config.sleep_sec));
-    #endif
-    return true; // Indicate successful loading
-}
-
-
-/**
- * @brief Ensures WiFi is connected, attempting to connect if necessary.
- * (Documentation moved to header/previous example - implementation unchanged)
- */
-bool ensureWiFiConnected(unsigned long timeout) {
-  if (wifiManager.getConnectionStatus() == WiFiManager::CONNECTED) {
-      return true;
-  }
-  if (wifiManager.getConnectionStatus() != WiFiManager::CONNECTING) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("WiFi not connected. Attempting connection...");
-      #endif
-      wifiManager.connectToWiFi();
-  }
-  led.setState(CONNECTING_WIFI);
-  unsigned long startTime = millis();
-  while (millis() - startTime < timeout) {
-    wifiManager.handleWiFi();
-    if (wifiManager.getConnectionStatus() == WiFiManager::CONNECTED) {
-        return true;
-    }
-    if (wifiManager.getConnectionStatus() == WiFiManager::CONNECTION_FAILED) {
+    } else if (wakeup_cause != ESP_SLEEP_WAKEUP_TIMER && wakeup_cause != ESP_SLEEP_WAKEUP_UNDEFINED) {
+        performMainDataTasksThisCycle = true;
         #ifdef ENABLE_DEBUG_SERIAL
-          Serial.println("WiFi connection definitely failed (max retries).");
+            Serial.printf("[MainLoop] Woke up by other reason (%d), performing data collection.\n", wakeup_cause);
         #endif
-        break;
     }
-    delay(100);
-  }
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("WiFi connection timed out or failed within ensureWiFiConnected.");
-  #endif
-  led.setState(ERROR_WIFI);
-  return false;
-}
 
-/**
- * @brief Performs a simple LED blink sequence.
- * (Documentation moved to header/previous example - implementation unchanged)
- */
-void ledBlink() {
-  led.setState(ALL_OK); delay(700);
-  led.setState(OFF); delay(500);
-  led.setState(ALL_OK); delay(700);
-  led.setState(OFF); delay(500);
-  led.setState(ALL_OK); delay(700);
-  led.setState(OFF); delay(500);
-}
+    if (wakeup_cause != ESP_SLEEP_WAKEUP_TIMER) {
+        performMainDataTasksThisCycle = true;
+        #ifdef ENABLE_DEBUG_SERIAL
+            if (wakeup_cause == ESP_SLEEP_WAKEUP_UNDEFINED) {
+                 Serial.println(F("[MainLoop] Wakeup cause UNDEFINED (likely first boot/flash), ensuring data collection."));
+            } else {
+                 Serial.printf("[MainLoop] Wakeup cause %d (not timer), ensuring data collection.\n", wakeup_cause);
+            }
+        #endif
+    }
 
-/**
- * @brief Initializes all connected sensors in sequence.
- * (Documentation moved to header/previous example - implementation unchanged)
- */
-bool initializeSensors() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Initializing DHT22...");
-  #endif
-  dhtSensor.begin();
 
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Initializing I2C Bus (Pins SDA: " + String(I2C_SDA) + ", SCL: " + String(I2C_SCL) + ")...");
-  #endif
-  Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setClock(100000);
-  delay(100);
-
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Initializing BH1750 (Light Sensor)...");
-  #endif
-  if (!lightSensor.begin()) {
     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("!!! BH1750 Init FAILED !!!");
+        if (activeVentilationInProgress) {
+            Serial.println(F("[MainLoop] Mode: ACTIVE VENTILATION."));
+        } else {
+            Serial.println(F("[MainLoop] Mode: DEEP SLEEP CYCLE."));
+        }
+        Serial.printf("[MainLoop] RTC Value (nextMainDataCollectionDueTimeS_RTC) for sleep calc: %u s\n", nextMainDataCollectionDueTimeS_RTC);
     #endif
-    led.setState(ERROR_SENSOR); delay(3000); return false;
-  }
-  delay(100);
 
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Initializing MLX90640 (Thermal Sensor)...");
-  #endif
-  if (!thermalSensor.begin()) {
+    if (!activeVentilationInProgress && wakeup_cause == ESP_SLEEP_WAKEUP_TIMER) {
+        ledBlink_Ctrl(led);
+    }
+
+    float currentInternalTemp = dhtInternalSensor.readTemperature();
+    float currentInternalHum = dhtInternalSensor.readHumidity();
     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("!!! MLX90640 Init FAILED !!!");
+        if (isnan(currentInternalTemp)) Serial.println(F("[MainLoop] Failed to read internal temperature."));
+        else Serial.printf("[MainLoop] Internal Temp: %.2f C, Hum: %.2f %%\n", currentInternalTemp, currentInternalHum);
     #endif
-    led.setState(ERROR_SENSOR); delay(3000); return false;
-  }
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Waiting for MLX90640 stabilization (~2s)...");
-  #endif
-  delay(2000);
 
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Initializing OV2640 (Camera)...");
-  #endif
-  if (!camera.begin()) {
+    if (!isnan(currentInternalTemp)) {
+        fanController.controlTemperature(currentInternalTemp);
+    }
+    // ... (Actualización del LED basada en el estado del ventilador, como lo tenías)
+
+    // --- Active Ventilation Mode Logic (MODIFICADA PARA PROBLEMA 1 DE PREGUNTA ANTERIOR) ---
+    if (activeVentilationInProgress) {
+        if (!fanController.isOn()) fanController.turnOn();
+        // ... (led state) ...
+        if (!isnan(currentInternalTemp) && currentInternalTemp < INTERNAL_LOW_TEMP_OFF) {
+            activeVentilationInProgress = false;
+            fanController.turnOff();
+            // ... (led state, log, delay) ...
+            // NO HAY RETURN AQUÍ, permite que continúe para posible toma de datos o cálculo de sueño
+        } else { // Temperatura aún alta
+            // Si performMainDataTasksThisCycle es true, las tareas de datos se ejecutarán más abajo.
+            // Si NO es momento de tareas de datos (porque la ventilación está en un sub-ciclo de monitoreo),
+            // entonces sí hacemos return para un ciclo corto.
+            // ¿Cómo sabemos si es un sub-ciclo?
+            // Por ahora, la lógica original era:
+            // bool needsDataCollectionDuringVentilation = (nextMainDataCollectionDueTimeS_RTC == 0 || currentDeviceUptimeS >= nextMainDataCollectionDueTimeS_RTC);
+            // Esta condición `needsDataCollectionDuringVentilation` ya no es confiable.
+            // Con `performMainDataTasksThisCycle = true` al despertar, las tareas se harán.
+            // El `return` aquí solo debería ocurrir si las tareas YA se hicieron en este ciclo de "despierto"
+            // y solo estamos monitoreando. Esto se maneja en la sección "Post-Data Collection Ventilation Check".
+            // Así que aquí, si la temperatura sigue alta, simplemente dejamos que el flujo continúe.
+             #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println(F("[MainLoop] Ventilation active, temp high. Proceeding with main cycle flow."));
+            #endif
+        }
+    } else { // Not currently in activeVentilationInProgress
+        if (!isnan(currentInternalTemp) && currentInternalTemp > INTERNAL_HIGH_TEMP_ON) {
+            activeVentilationInProgress = true;
+            ventilationStartUptimeS = currentDeviceUptimeS;
+            fanController.turnOn();
+        }
+    }
+
+    // --- WiFi, API, y Toma de Datos ---
+    String logUrl = api_comm ? api_comm->getBaseApiUrl() + config.apiLogPath : "";
+    if (performMainDataTasksThisCycle || (activeVentilationInProgress && (nextMainDataCollectionDueTimeS_RTC == 0 || currentDeviceUptimeS >= nextMainDataCollectionDueTimeS_RTC)) ) {
+
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[MainLoop] Proceeding with WiFi/API checks..."));
+        #endif
+        wifiManager.handleWiFi();
+        if (!ensureWiFiConnected_Ctrl(wifiManager, led, 20000)) {
+            ErrorLogger::sendLog(logUrl, api_comm ? api_comm->getAccessToken() : "", LOG_TYPE_ERROR, "WiFi connection failed.", currentInternalTemp, currentInternalHum);
+            prepareForSleep_Ctrl(false, led, camera);
+            deepSleep_Ctrl(60, &led);
+            return;
+        }
+        if (!handleApiAuthenticationAndActivation_Ctrl(config, *api_comm, led, currentInternalTemp, currentInternalHum)) {
+            prepareForSleep_Ctrl(false, led, camera);
+            unsigned long sleepApiFailS = api_comm->getDataCollectionTimeMinutes();
+            if (sleepApiFailS <=0) sleepApiFailS = config.sleep_sec; else sleepApiFailS = (sleepApiFailS > 5 ? sleepApiFailS * 60 : 5 * 60);
+            deepSleep_Ctrl(sleepApiFailS, &led);
+            return;
+        }
+        // ... (actualizar LED si API OK) ...
+    }
+
+
+    // --- Main Data Collection Execution ---
+    unsigned long mainDataIntervalS_target = api_comm->getDataCollectionTimeMinutes();
+    if (mainDataIntervalS_target == 0) {
+        // Asigna un valor por defecto si la API no devuelve uno o es 0
+        // Necesitas definir DEFAULT_DATA_COLLECTION_MINUTES en alguna parte
+        // Por ejemplo, #define DEFAULT_DATA_COLLECTION_MINUTES 5
+        mainDataIntervalS_target = config.sleep_sec / 60; // O usa el sleep_sec de config
+        if (mainDataIntervalS_target == 0) mainDataIntervalS_target = 1; // Asegurar al menos 1 minuto
+         #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[MainLoop] API data collection interval is 0, using default/config: %lu minutes\n", mainDataIntervalS_target);
+         #endif
+    }
+    mainDataIntervalS_target *= 60; // Convertir a segundos
+
+
+    uint8_t* localJpegImage = nullptr;
+    size_t localJpegLength = 0;
+    float* localThermalData = nullptr;
+
+    // La decisión de `performMainDataTasksThisCycle` ya se tomó arriba basada en wakeup_cause
+    if (performMainDataTasksThisCycle) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[MainLoop] --- Performing Main Data Collection Tasks ---"));
+        #endif
+        LEDState previousLedStateBeforeData = led.getCurrentState();
+
+        if (!performEnvironmentTasks_Env(config, *api_comm, lightSensor, dhtExternalSensor, led, currentInternalTemp, currentInternalHum)) {
+            cycleStatusOK = false;
+        }
+        if (cycleStatusOK) {
+            if (!performImageTasks_Img(config, *api_comm, camera, thermalSensor, led,
+                                       &localJpegImage, localJpegLength, &localThermalData, currentInternalTemp, currentInternalHum)) {
+                cycleStatusOK = false;
+            }
+        }
+
+        if (localJpegImage || localThermalData) {
+            cleanupImageBuffers_Ctrl(localJpegImage, localThermalData);
+            localJpegImage = nullptr;
+            localThermalData = nullptr;
+        }
+
+        if (cycleStatusOK) {
+            nextMainDataCollectionDueTimeS_RTC = currentDeviceUptimeS + mainDataIntervalS_target;
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[MainLoop] Main data tasks SUCCEEDED. Next collection due at RTC uptime target: %u. (current_uptime %u + interval %lu)\n",
+                              nextMainDataCollectionDueTimeS_RTC, currentDeviceUptimeS, mainDataIntervalS_target);
+            #endif
+        } else {
+            nextMainDataCollectionDueTimeS_RTC = currentDeviceUptimeS + MIN_SLEEP_S;
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[MainLoop] Main data tasks FAILED. Scheduling quick retry. Next collection due at RTC uptime target: %u. (current_uptime %u + min_sleep %d)\n",
+                              nextMainDataCollectionDueTimeS_RTC, currentDeviceUptimeS, MIN_SLEEP_S);
+            #endif
+        }
+        ErrorLogger::sendLog(logUrl, api_comm->getAccessToken(), cycleStatusOK ? LOG_TYPE_INFO : LOG_TYPE_WARNING,
+                             cycleStatusOK ? "Main data collection cycle completed successfully." : "Main data collection cycle completed with errors.",
+                             currentInternalTemp, currentInternalHum);
+        // ... (Restaurar LED state) ...
+    } else {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[MainLoop] Main data tasks SKIPPED this cycle based on initial decision."));
+            // Si se saltaron las tareas, nextMainDataCollectionDueTimeS_RTC no se actualiza.
+            // El cálculo del sueño usará el valor de RTC persistente.
+        #endif
+        cycleStatusOK = true; // Considerar el ciclo OK si solo se saltaron tareas programadas para no hacerse.
+    }
+
+
+    // --- Post-Data Collection / Post-Ventilation-Decision Ventilation Check ---
+    if (activeVentilationInProgress) {
+        currentInternalTemp = dhtInternalSensor.readTemperature(); // Re-leer temperatura
+        if (!isnan(currentInternalTemp) && currentInternalTemp < INTERNAL_LOW_TEMP_OFF) {
+            activeVentilationInProgress = false;
+            fanController.turnOff();
+            // ... (led state, log, delay) ...
+        } else if (!isnan(currentInternalTemp)) { // Temp sigue alta
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[MainLoop] Active ventilation CONTINUES (after data tasks or decision). Temp: %.1fC. Monitoring...\n", currentInternalTemp);
+            #endif
+            delay(FAN_ON_ACTIVE_MONITOR_DELAY_MS);
+            return; // Loop de nuevo para ventilación activa (NO VA A DORMIR)
+        }
+    }
+
+    // --- Calculate and Enter Deep Sleep ---
+    unsigned long sleepDurationFinalS;
+    awakeTimeThisCycleS = (millis() - cycleStartTimeMs) / 1000;
+
+    if (nextMainDataCollectionDueTimeS_RTC > currentDeviceUptimeS) {
+        sleepDurationFinalS = nextMainDataCollectionDueTimeS_RTC - currentDeviceUptimeS;
+    } else {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[MainLoop] RTC target %u not in future of current uptime %u or RTC is 0. Calculating default sleep.\n",
+                          nextMainDataCollectionDueTimeS_RTC, currentDeviceUptimeS);
+        #endif
+        // Si RTC es 0 (primer boot y falló antes de fijar RTC) o si el tiempo ya pasó (currentUptime > RTC)
+        // Necesitamos un plan B para el sueño.
+        if (performMainDataTasksThisCycle && !cycleStatusOK) { // Si se intentaron datos y fallaron en este ciclo
+            sleepDurationFinalS = MIN_SLEEP_S;
+        } else { // Para otros casos (ej. primer boot sin RTC fijado, o RTC ya pasó)
+                 // Dormir por el intervalo principal menos el tiempo despierto, o MIN_SLEEP_S.
+            sleepDurationFinalS = mainDataIntervalS_target > awakeTimeThisCycleS ? mainDataIntervalS_target - awakeTimeThisCycleS : MIN_SLEEP_S;
+        }
+    }
+
+    if (sleepDurationFinalS < MIN_SLEEP_S) {
+        sleepDurationFinalS = MIN_SLEEP_S;
+    }
+
+    // Lógica de "capping" que volviste a poner (con el buffer de +1 minuto)
+    if (mainDataIntervalS_target > 0 && sleepDurationFinalS > mainDataIntervalS_target) {
+        if (sleepDurationFinalS > mainDataIntervalS_target + (1 * 60)) {
+            sleepDurationFinalS = mainDataIntervalS_target + (1*60);
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[MainLoop] Capping sleep duration to target interval + 1 min: %lu s.\n", sleepDurationFinalS);
+            #endif
+        }
+    }
+
     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("!!! OV2640 Init FAILED !!!");
+        Serial.printf("[MainLoop] RTC Value for sleep calc (nextMainDataCollectionDueTimeS_RTC): %u s\n", nextMainDataCollectionDueTimeS_RTC);
+        Serial.printf("[MainLoop] Awake time this cycle: %u s. Final determined sleep duration: %lu seconds.\n", awakeTimeThisCycleS, sleepDurationFinalS);
     #endif
-    led.setState(ERROR_SENSOR); delay(3000); return false;
-  }
-  delay(500);
 
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("All sensors initialized successfully.");
-  #endif
-  return true;
-}
-
-/**
- * @brief Reads environmental data (light, temp, humidity) with retries
- * and sends it to the configured API endpoint. Sets LED state and returns status.
- * This version orchestrates calls to helper functions for reading and sending.
- * @return True if data was read and sent successfully, False otherwise.
- */
-bool readEnvironmentData() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("--- Reading Environment Sensors ---");
-  #endif
-
-  float light = -1.0; // Initialize with invalid value
-  float temp = NAN;   // Initialize with invalid value
-  float hum = NAN;    // Initialize with invalid value
-
-  led.setState(TAKING_DATA); // Set LED to indicate data capture phase
-  delay(1000); // Short delay before reading sensors
-  
-  // Read sensors using helper functions with retries
-  bool lightOK = readLightSensorWithRetry(light);
-  bool dhtOK = readDHTSensorWithRetry(temp, hum);
-
-  // Check if all readings were successful
-  if (!lightOK || !dhtOK) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Failed to read one or more environment sensors after retries.");
-      #endif
-      // Set a generic data error state; specific sensor read function might log details
-      led.setState(ERROR_DATA);
-      delay(3000); // Show error
-      return false; // Indicate overall failure for this task
-  }
-
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("All environment sensors read successfully. Proceeding to send...");
-    Serial.printf("  Read values: Light=%.2f lx, Temp=%.2f C, Hum=%.2f %%\n", light, temp, hum);
-  #endif
-
-  // Attempt to send the valid data using a helper function
-  if (!sendEnvironmentDataToServer(light, temp, hum)) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Failed to send environment data to server.");
-      #endif
-      // Error LED state and delay are handled within sendEnvironmentDataToServer
-      return false; // Indicate overall failure for this task
-  }
-
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Environment data sent successfully to server.");
-  #endif
-  return true; // Indicate overall success for this task
-}
-
-/**
- * @brief Captures thermal data (MLX90640) and a visual image (OV2640).
- * Orchestrates calls to helper functions for capturing and allocating memory.
- * Caller must free the allocated buffers (*thermalData and *jpegImage).
- * Sets LED state and returns status.
- *
- * @param[out] jpegImage Pointer to a uint8_t pointer, will be set to the allocated JPEG buffer address.
- * @param[out] jpegLength Reference to size_t, will be set to the JPEG buffer size.
- * @param[out] thermalData Pointer to a float pointer, will be set to the allocated thermal data buffer address.
- * @return True if both captures and allocations were successful, False otherwise.
- */
-bool captureImages(uint8_t** jpegImage, size_t& jpegLength, float** thermalData) {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("--- Capturing Images ---");
-  #endif
-  // Ensure output pointers are null initially
-  *jpegImage = nullptr;
-  *thermalData = nullptr;
-  jpegLength = 0;
-
-  // 1. Capture and Copy Thermal Data
-  if (!captureAndCopyThermalData(thermalData)) {
-      // Error logged within helper function
-      led.setState(ERROR_DATA);
-      delay(3000);
-      return false; // Thermal capture/copy failed
-  }
-
-  // 2. Capture Visual JPEG Data
-  if (!captureVisualJPEG(jpegImage, jpegLength)) {
-      // Error logged within helper function
-      led.setState(ERROR_DATA);
-      delay(3000);
-
-      // *** CRITICAL: Free thermal data buffer if JPEG capture failed ***
-      if (*thermalData != nullptr) {
-          #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("Freeing thermal data buffer due to JPEG capture failure.");
-          #endif
-          free(*thermalData);
-          *thermalData = nullptr; // Avoid dangling pointer
-      }
-      return false; // Visual capture failed
-  }
-
-  // If both captures succeeded
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Both thermal and visual images captured successfully.");
-  #endif
-  return true;
-}
-
-/**
- * @brief Sends the captured thermal and visual image data.
- * (Documentation moved to header/previous example - implementation unchanged)
- */
-bool sendImageData(uint8_t* jpegImage, size_t jpegLength, float* thermalData) {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Sending thermal and image data via HTTP POST (multipart) to " + config.api_img + "...");
-  #endif
-  // Use configuration value for API URL
-  bool sendSuccess = MultipartDataSender::IOThermalAndImageData(
-    config.api_img, thermalData, jpegImage, jpegLength
-  );
-  delay(1000);
-
-  if (!sendSuccess) {
-     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("HTTP POST for image data failed.");
-    #endif
-    led.setState(ERROR_SEND);
-    delay(3000);
-    return false;
-  }
-
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Image data HTTP POST successful.");
-  #endif
-  return true;
-}
-
-/**
- * @brief Cleans up allocated resources (memory, camera).
- * (Documentation moved to header/previous example - implementation unchanged)
- */
-void cleanupResources(uint8_t* jpegImage, float* thermalData) {
-  if (jpegImage != nullptr) {
-    #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("Freeing JPEG image buffer...");
-    #endif
-    free(jpegImage);
-  }
-  if (thermalData != nullptr) {
-     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("Freeing thermal data buffer...");
-    #endif
-    free(thermalData);
-  }
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Deinitializing camera (calling camera.end())...");
-  #endif
-  camera.end();
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Camera deinitialized.");
-  #endif
-  delay(50);
-}
-
-/**
- * @brief Enters ESP32 deep sleep mode.
- * (Documentation moved to header/previous example - implementation unchanged)
- */
-void deepSleep(unsigned long seconds) {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.printf("Entering deep sleep for %lu seconds...\n", seconds);
-    Serial.println("--------------------------------------");
-    delay(100);
-  #endif
-  led.turnOffAll();
-  esp_sleep_enable_timer_wakeup(seconds * 1000000ULL);
-  esp_deep_sleep_start();
-  // Execution stops here
-}
-
-// --- Setup Helper Function Implementations ---
-
-/**
- * @brief Initializes the Serial port if debug is enabled.
- */
-void initSerial() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.begin(115200);
-    while (!Serial); // Optional: wait for serial connection
-    uint64_t chipid = ESP.getEfuseMac();
-    Serial.printf("\n--- Device Booting / Waking Up (ID: %04X%08X) ---\n", (uint16_t)(chipid>>32), (uint32_t)chipid);
-  #endif
-}
-
-/**
-* @brief Initializes the status LED.
-*/
-void initLED() {
-  led.begin();
-  led.setState(ALL_OK); // Set initial state
-}
-
-/**
-* @brief Initializes the LittleFS filesystem.
-* Attempts to mount, and formats if mounting fails initially.
-* Sets error LED and returns false on critical failure.
-* @return True if filesystem is mounted successfully, False otherwise.
-*/
-bool initFilesystem() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Mounting LittleFS...");
-  #endif
-  if (!LittleFS.begin(false)) { // false = don't format on fail initially
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("LittleFS mount failed! Trying to format...");
-      #endif
-      // If mount failed, try formatting and mounting again
-      if (!LittleFS.begin(true)) { // true = format if mount fails
-          #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("CRITICAL: Formatting LittleFS failed!");
-          #endif
-          led.setState(ERROR_DATA); // Use ERROR_DATA for FS failure
-          delay(3000); // Show error
-          return false; // Return critical failure
-      } else {
-          #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("LittleFS formatted successfully. Config file may need uploading.");
-          #endif
-          // Filesystem formatted, loadConfiguration will use defaults.
-      }
-  }
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("LittleFS mounted successfully.");
-  #endif
-  return true; // Filesystem mounted
-}
-
-/**
-* @brief Loads configuration from LittleFS and sets WiFi credentials.
-* Prints status messages if debug is enabled. Uses default config values on failure.
-*/
-void loadConfigAndSetCredentials() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Loading configuration from " + String(CONFIG_FILENAME) + "...");
-  #endif
-  if (!loadConfiguration(CONFIG_FILENAME)) {
-     #ifdef ENABLE_DEBUG_SERIAL
-       Serial.println("Failed to load configuration or file not found. Using defaults.");
-     #endif
-     // Continue with default values stored in the global 'config' object
-  }
-
-  // Set WiFi credentials in the WiFiManager instance
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Setting WiFi credentials...");
-  #endif
-  wifiManager.setCredentials(config.wifi_ssid, config.wifi_pass);
-}
-
-/**
-* @brief Handles the logic when sensor initialization fails.
-* Sets error LED, unmounts LittleFS, and enters deep sleep.
-*/
-void handleSensorInitFailure() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Sensor initialization failed. Entering deep sleep.");
-  #endif
-  // LED state should have been set by the failing init helper function.
-  LittleFS.end(); // Unmount filesystem before sleeping
-  delay(500);     // Short delay
-  deepSleep(config.sleep_sec); // Use sleep duration from config (or default)
-  // Execution stops here.
-}
-
-// --- Loop Helper Function Implementations ---
-
-/**
- * @brief Handles WiFi connection check at the start of the loop.
- * Calls ensureWiFiConnected and initiates sleep cycle immediately on failure.
- * @return True if WiFi is connected, False if connection failed (and sleep was initiated).
- */
-bool handleWiFiConnection() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Checking WiFi connection status...");
-  #endif
-  if (!ensureWiFiConnected(WIFI_CONNECT_TIMEOUT_MS)) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("WiFi connection failed or timed out in loop. Entering sleep.");
-      #endif
-      delay(3000); // Show error color
-      // Need cleanup before sleeping even if no buffers were allocated this cycle, primarily for camera
-      cleanupResources(nullptr, nullptr); // Pass nullptrs as buffers aren't allocated yet
-      LittleFS.end(); // Ensure filesystem is unmounted
-      deepSleep(config.sleep_sec);
-      // Execution stops here if deepSleep is entered
-      return false; // Indicate connection failure
-  }
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("WiFi connection OK.");
-  #endif
-  return true; // Indicate connection success
-}
-
-/**
-* @brief Performs the tasks related to reading and sending environmental data.
-* Calls readEnvironmentData() and logs status.
-* @return True if tasks were successful, False otherwise.
-*/
-bool performEnvironmentTasks() {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("--- Performing Environment Tasks ---");
-    Serial.println("Task: Read & Send Environmental Data");
-  #endif
-
-  if (!readEnvironmentData()) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Task Failed: Read/Send Environmental Data.");
-      #endif
-      // Error LED state is set within readEnvironmentData on failure
-      return false;
-  }
-
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Task OK: Environmental data read and sent.");
-  #endif
-  return true;
-}
-
-/**
-* @brief Performs tasks related to capturing and sending (or saving) image data.
-* Calls captureImages, sendImageData, and potentially saveDataToFS. Manages LED states.
-* @param[out] jpegImage Pointer to the JPEG image buffer pointer (will be allocated by captureImages).
-* @param[out] jpegLength Reference to the JPEG image length.
-* @param[out] thermalData Pointer to the thermal data buffer pointer (will be allocated by captureImages).
-* @return True if tasks were successful (capture & send OK), False otherwise (capture failed OR send failed).
-*/
-bool performImageTasks(uint8_t** jpegImage, size_t& jpegLength, float** thermalData) {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("--- Performing Image Tasks ---");
-    Serial.println("Task: Capture Images (Thermal & Visual)");
-  #endif
-  led.setState(TAKING_DATA); // Set LED for capture phase
-  delay(1000); // Short delay before capturing
-  // Ensure pointers are null initially
-  *jpegImage = nullptr;
-  *thermalData = nullptr;
-  jpegLength = 0;
-
-  // 1. Capture Images
-  if (!captureImages(jpegImage, jpegLength, thermalData)) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Task Failed: Capture Images.");
-      #endif
-      // Resources allocated within captureImages should be freed by it on failure
-      return false; // Return failure status
-  }
-   #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("Task OK: Images captured. Proceeding to send...");
-   #endif
-
-  // 2. Send Image Data (if capture was OK)
-  led.setState(SENDING_DATA); // Set LED for sending phase
-  delay(1000); // Short delay before sending
-
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Task: Send Image Data");
-  #endif
-  if (!sendImageData(*jpegImage, jpegLength, *thermalData)) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Task Failed: Send Image Data. Attempting to save to FS (if implemented)...");
-      #endif
-      // Even if saving fails, we return false because the primary send failed.
-      return false; // Return failure status
-  }
-
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Task OK: Image data sent successfully.");
-  #endif
-  return true; // All image tasks successful
-}
-
-/**
-* @brief Prepares the device for deep sleep.
-* Sets the final LED status based on cycle success, performs a final blink,
-* and unmounts the LittleFS filesystem.
-* @param cycleStatusOK Indicates if the main loop cycle completed without errors.
-*/
-void prepareForSleep(bool cycleStatusOK) {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("--- Preparing for Sleep ---");
-  #endif
-
-  // Set final LED status
-  if (cycleStatusOK) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Cycle OK. Setting LED to ALL_OK.");
-      #endif
-  } else {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("Cycle finished with errors. LED should show last error state.");
-      #endif
-  }
-
-  // Perform final blink sequence
-  ledBlink();
-
-  // Unmount LittleFS before sleeping
-  LittleFS.end();
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Unmounted LittleFS.");
-  #endif
-}
-
-// --- Environment Task Helper Function Implementations ---
-
-/**
- * @brief Reads the light sensor (BH1750) value with retries.
- * @param[out] lightLevel Reference to store the successfully read light level (in lux).
- * @return True if read successfully within retries, False otherwise.
- */
-bool readLightSensorWithRetry(float &lightLevel) {
-  lightLevel = -1.0; // Ensure initial invalid state
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.print("Reading light sensor");
-  #endif
-  for (int i = 0; i < SENSOR_READ_RETRIES; i++) {
-      lightLevel = lightSensor.readLightLevel();
-      if (lightLevel >= 0) { // BH1750 library returns >= 0 on success
-          #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(" OK (" + String(lightLevel) + " lx)");
-          #endif
-          return true; // Success
-      }
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.print(".");
-      #endif
-      delay(500); // Wait before retry
-  }
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println(" FAILED after retries.");
-  #endif
-  return false; // Failed after all retries
-}
-
-/**
-* @brief Reads the temperature and humidity sensor (DHT22) values with retries.
-* @param[out] temperature Reference to store the successfully read temperature (°C).
-* @param[out] humidity Reference to store the successfully read humidity (%).
-* @return True if both values were read successfully within retries, False otherwise.
-*/
-bool readDHTSensorWithRetry(float &temperature, float &humidity) {
-  temperature = NAN; // Ensure initial invalid state
-  humidity = NAN;    // Ensure initial invalid state
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.print("Reading DHT22 sensor");
-  #endif
-  for (int i = 0; i < SENSOR_READ_RETRIES; i++) {
-      temperature = dhtSensor.readTemperature();
-      humidity = dhtSensor.readHumidity();
-      // Check if both readings are valid numbers
-      if (!isnan(temperature) && !isnan(humidity)) {
-          #ifdef ENABLE_DEBUG_SERIAL
-             Serial.println(" OK (" + String(temperature) + "C, " + String(humidity) + "%)");
-          #endif
-          return true; // Success
-      }
-       #ifdef ENABLE_DEBUG_SERIAL
-        Serial.print(".");
-      #endif
-      delay(1000); // Wait longer for DHT retry
-  }
-   #ifdef ENABLE_DEBUG_SERIAL
-     Serial.println(" FAILED after retries.");
-   #endif
-  return false; // Failed after all retries
-}
-
-/**
-* @brief Sends the collected environmental data to the server.
-* Handles setting LED state and logging for the send operation.
-* @param lightLevel The light level value to send.
-* @param temperature The temperature value to send.
-* @param humidity The humidity value to send.
-* @return True if the data was sent successfully (HTTP 2xx), False otherwise.
-*/
-bool sendEnvironmentDataToServer(float lightLevel, float temperature, float humidity) {
-  led.setState(SENDING_DATA); // Set LED to sending status
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Sending environmental data via HTTP POST to " + config.api_env + "...");
-  #endif
-
-  // Use configuration value for API URL
-  bool sendSuccess = EnvironmentDataJSON::IOEnvironmentData(
-      config.api_env, lightLevel, temperature, humidity
-  );
-  delay(1000); // Short delay after sending attempt
-
-  if (!sendSuccess) {
-      #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("HTTP POST for environmental data failed.");
-      #endif
-      led.setState(ERROR_SEND); // Set LED to send error
-      delay(3000); // Show error
-      // ErrorLogger::sendLog(String(API_LOGGING), "ENV_SEND_FAIL", "Environment data send failed"); // Currently commented out
-      return false; // Indicate failure
-  }
-
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Environmental data HTTP POST successful.");
-  #endif
-  // Optionally set LED back to a 'processing' state or leave as SENDING for now
-  // led.setState(TAKING_DATA); // Or ALL_OK briefly? Depends on flow.
-  return true; // Indicate success
-}
-
-// --- Image Capture Helper Function Implementations ---
-
-/**
- * @brief Reads a frame from the thermal sensor, allocates memory, and copies the data.
- * @param[out] thermalDataBuffer Pointer to a float pointer, will be allocated and filled.
- * @return True on success, False on failure (read, alloc, or copy).
- */
-bool captureAndCopyThermalData(float** thermalDataBuffer) {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Reading thermal frame...");
-  #endif
-  if (!thermalSensor.readFrame()) {
-     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("Failed to read thermal frame.");
-     #endif
-     *thermalDataBuffer = nullptr; // Ensure null on failure
-     return false;
-  }
-
-  float* rawThermalData = thermalSensor.getThermalData();
-  if (rawThermalData == nullptr) {
-     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("Failed to get thermal data pointer (null).");
-     #endif
-     *thermalDataBuffer = nullptr;
-     return false;
-  }
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Thermal frame read OK. Allocating buffer...");
-  #endif
-
-  // Allocate memory for the copy
-  const size_t thermalSize = 32 * 24 * sizeof(float);
-  #if CONFIG_SPIRAM_SUPPORT || CONFIG_ESP32_SPIRAM_SUPPORT
-    *thermalDataBuffer = (float*)ps_malloc(thermalSize);
-  #else
-    *thermalDataBuffer = (float*)malloc(thermalSize);
-  #endif
-
-  if (*thermalDataBuffer == nullptr) {
-     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("!!! Failed to allocate memory for thermal data copy !!!");
-     #endif
-     // ErrorLogger::sendLog(String(API_LOGGING), "MALLOC_FAIL", "Thermal data malloc failed");
-     return false;
-  }
-
-  // Copy data to the newly allocated buffer
-  memcpy(*thermalDataBuffer, rawThermalData, thermalSize);
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Thermal data buffer allocated and copied.");
-  #endif
-  return true;
-}
-
-/**
-* @brief Captures a JPEG image using the camera.
-* The camera library allocates the buffer.
-* @param[out] jpegImageBuffer Pointer to a uint8_t pointer, set to the allocated buffer.
-* @param[out] jpegLength Reference set to the size of the captured image.
-* @return True on success, False on failure.
-*/
-bool captureVisualJPEG(uint8_t** jpegImageBuffer, size_t& jpegLength) {
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.println("Capturing JPEG image...");
-  #endif
-  // captureJPEG allocates memory; caller of captureImages is responsible for freeing jpegImageBuffer
-  *jpegImageBuffer = camera.captureJPEG(jpegLength);
-
-  if (*jpegImageBuffer == nullptr || jpegLength == 0) {
-     #ifdef ENABLE_DEBUG_SERIAL
-      Serial.println("!!! Failed to capture JPEG image or allocation failed !!!");
-     #endif
-     // ErrorLogger::sendLog(String(API_LOGGING), "JPEG_CAPTURE_FAIL", "JPEG capture failed");
-     return false;
-  }
-
-  #ifdef ENABLE_DEBUG_SERIAL
-    Serial.printf("JPEG Image captured successfully (%d bytes).\n", jpegLength);
-  #endif
-  return true;
+    prepareForSleep_Ctrl(cycleStatusOK, led, camera);
+    deepSleep_Ctrl(sleepDurationFinalS, &led);
 }

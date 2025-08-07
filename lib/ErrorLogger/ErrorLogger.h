@@ -1,22 +1,55 @@
+/**
+ * @file ErrorLogger.h
+ * @brief Defines a utility class for sending structured log messages to a remote server.
+ *
+ * Provides a static method to format log messages (INFO, WARNING, ERROR) as JSON
+ * and send them via an authenticated HTTP POST request.
+ */
 #ifndef ERRORLOGGER_H
 #define ERRORLOGGER_H
 
-#include <Arduino.h> // Para String
+#include <Arduino.h> // Required for String class
 
+// Define standard log types as const char* for efficiency and consistency
+const char LOG_TYPE_INFO[] = "INFO";
+const char LOG_TYPE_WARNING[] = "WARNING";
+const char LOG_TYPE_ERROR[] = "ERROR";
+
+/**
+ * @class ErrorLogger
+ * @brief Utility class with a static method for sending log messages.
+ *
+ * This class handles formatting log data into JSON and POSTing it to a specified endpoint.
+ * It requires the caller to provide the full URL, an access token for authorization,
+ * the log type, and the message.
+ */
 class ErrorLogger {
 public:
     /**
-     * @brief Envía un mensaje de log de error al endpoint especificado.
-     * 
-     * Construye un JSON con la fuente del error, el mensaje y un timestamp (millis)
-     * y lo envía vía HTTP POST.
-     * 
-     * @param apiUrl La URL completa del endpoint de logging en el backend.
-     * @param errorSource Una cadena corta identificando dónde ocurrió el error (e.g., "SENSOR_INIT", "DHT_READ", "CAPTURE_FAIL").
-     * @param errorMessage El mensaje detallado del error.
-     * @return true si el log se envió y el servidor respondió con un código 2xx, false en caso contrario (incluyendo si no hay conexión WiFi).
+     * @brief Sends a log message to the specified API endpoint.
+     *
+     * Constructs a JSON payload with the structure:
+     * `{"logType": "TYPE_HERE", "logMessage": "Your message here"}`
+     * Optionally includes `internalTemperature` and `internalHumidity` if valid values are provided.
+     * Sends it via HTTP POST to the given URL using an access token for authorization.
+     * The caller is responsible for ensuring WiFi is connected and the accessToken is valid
+     * before calling this method.
+     *
+     * @param fullLogUrl The complete URL (String) of the backend logging endpoint.
+     * @param accessToken The access token (String) for `Authorization: Device <token>` header.
+     * If empty, the request might be sent without authorization.
+     * @param logType The type of log (e.g., "INFO", "WARNING", "ERROR"). Use the predefined
+     * LOG_TYPE_INFO, LOG_TYPE_WARNING, LOG_TYPE_ERROR constants.
+     * @param logMessage The detailed log message (String).
+     * @param internalTemp Optional. The internal temperature reading (float). Defaults to NAN.
+     * If NAN, this field will not be included in the JSON payload.
+     * @param internalHum Optional. The internal humidity reading (float). Defaults to NAN.
+     * If NAN, this field will not be included in the JSON payload.
+     * @return `true` if the log message was successfully sent AND the server responded with an
+     * HTTP 2xx status code. Returns `false` if the HTTP request fails, or if the server
+     * responds with a non-2xx status code, or if essential parameters are missing.
      */
-    static bool sendLog(const String& apiUrl, const String& errorSource, const String& errorMessage);
+    static bool sendLog(const String& fullLogUrl, const String& accessToken, const char* logType, const String& logMessage, float internalTemp = NAN, float internalHum = NAN);
 };
 
 #endif // ERRORLOGGER_H

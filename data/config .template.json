@@ -1,0 +1,14 @@
+{
+    "wifi_ssid": "",
+    "wifi_pass": "",
+    "FIRMWARE_DEVICE_ID": 0, 
+    "FIRMWARE_ACTIVATION_CODE": "", 
+    "api_base_url": "https://domain.com", 
+    "api_activate_path": "/api/endpoint",
+    "api_auth_path": "/api/endpoint",
+    "api_refresh_token_path": "/api/endpoint",
+    "api_log_path": "/api/endpoint",
+    "api_ambient_data_path": "/api/endpoint",
+    "api_capture_data_path": "/api/endpoint",
+    "sleep_sec": 60
+}
