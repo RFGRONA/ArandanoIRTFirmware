@@ -9,14 +9,19 @@
 #include "API.h"
 #include "LEDStatus.h"
 #include "ConfigManager.h" 
+#include "SDManager.h"   
+#include "TimeManager.h"
 
 // --- Function Prototypes for ImageTasks ---
 /** @brief Orchestrates capturing and sending image data tasks.
+ * @param sdMgr Reference to SDManager for SD card operations.
+ * @param timeMgr Reference to TimeManager for time operations.
  * @param cfg Reference to global Config.
  * @param api_obj Reference to the API object.
  * @param visCamera Reference to OV2640 camera.
  * @param thermalSensor Reference to MLX90640 thermal sensor.
  * @param sysLed Reference to LEDStatus object.
+ * @param lightLevel Light level in lux for RGB capture decision.
  * @param[out] jpegImage Pointer to a uint8_t* for the JPEG image buffer.
  * @param[out] jpegLength Reference to size_t for the JPEG length.
  * @param[out] thermalData Pointer to a float* for the thermal data buffer.
@@ -24,10 +29,11 @@
  * @param internalHumForLog Internal humidity to include in logs.
  * @return True if images captured AND sent successfully.
  */
-bool performImageTasks_Img(Config& cfg, API& api_obj, OV2640Sensor& visCamera, MLX90640Sensor& thermalSensor, LEDStatus& sysLed,
-                           uint8_t** jpegImage, size_t& jpegLength, float** thermalData, float internalTempForLog, float internalHumForLog);
+bool performImageTasks_Img(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, OV2640Sensor& visCamera, MLX90640Sensor& thermalSensor, LEDStatus& sysLed, float lightLevel, uint8_t** jpegImage, size_t& jpegLength, float** thermalData, float internalTempForLog, float internalHumForLog);
 
 /** @brief Captures thermal and visual image data into allocated buffers.
+ * @param sdMgr Reference to SDManager for SD card operations.
+ * @param timeMgr Reference to TimeManager for time operations.
  * @param visCamera Reference to OV2640 camera.
  * @param thermalSensor Reference to MLX90640 thermal sensor.
  * @param sysLed Reference to LEDStatus object for status indication.
@@ -40,11 +46,13 @@ bool performImageTasks_Img(Config& cfg, API& api_obj, OV2640Sensor& visCamera, M
  * @param internalHumForLog Internal humidity to include in logs if logging directly.
  * @return True if both images captured successfully.
  */
-bool captureImages_Img(OV2640Sensor& visCamera, MLX90640Sensor& thermalSensor, LEDStatus& sysLed,
+bool captureImages_Img(SDManager& sdMgr, TimeManager& timeMgr, OV2640Sensor& visCamera, MLX90640Sensor& thermalSensor, LEDStatus& sysLed,
                        uint8_t** jpegImage, size_t& jpegLength, float** thermalData,
                        Config& cfg, API& api_obj, float internalTempForLog, float internalHumForLog);
 
 /** @brief Sends captured image data (thermal and visual) to the image API endpoint.
+ * @param sdMgr Reference to SDManager for SD card operations.
+ * @param timeMgr Reference to TimeManager for time operations.
  * @param cfg Reference to global Config.
  * @param api_obj Reference to the API object.
  * @param jpegImage Pointer to the JPEG image buffer.
@@ -55,10 +63,12 @@ bool captureImages_Img(OV2640Sensor& visCamera, MLX90640Sensor& thermalSensor, L
  * @param internalHumForLog Internal humidity to include in logs.
  * @return True if data sent successfully.
  */
-bool sendImageData_Img(Config& cfg, API& api_obj, uint8_t* jpegImage, size_t jpegLength, float* thermalData, LEDStatus& sysLed, float internalTempForLog, float internalHumForLog);
+bool sendImageData_Img(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, uint8_t* jpegImage, size_t jpegLength, float* thermalData, LEDStatus& sysLed, float internalTempForLog, float internalHumForLog);
 
 
 /** @brief Captures a thermal data frame and copies it into a newly allocated buffer.
+ * @param sdMgr Reference to SDManager for SD card operations.
+ * @param timeMgr Reference to TimeManager for time operations.
  * @param thermalSensor Reference to MLX90640 thermal sensor.
  * @param[out] thermalDataBuffer Pointer to a float* for the thermal data buffer.
  * @param cfg Reference to global Config (for logUrl if logging directly).
@@ -67,9 +77,11 @@ bool sendImageData_Img(Config& cfg, API& api_obj, uint8_t* jpegImage, size_t jpe
  * @param internalHumForLog Internal humidity to include in logs if logging directly.
  * @return True if successful.
  */
-bool captureAndCopyThermalData_Img(MLX90640Sensor& thermalSensor, float** thermalDataBuffer, Config& cfg, API& api_obj, float internalTempForLog, float internalHumForLog);
+bool captureAndCopyThermalData_Img(SDManager& sdMgr, TimeManager& timeMgr, MLX90640Sensor& thermalSensor, float** thermalDataBuffer, Config& cfg, API& api_obj, float internalTempForLog, float internalHumForLog);
 
 /** @brief Captures a visual JPEG image into a buffer allocated by the camera driver.
+ * @param sdMgr Reference to SDManager for SD card operations.
+ * @param timeMgr Reference to TimeManager for time operations.
  * @param visCamera Reference to OV2640 camera.
  * @param[out] jpegImageBuffer Pointer to a uint8_t* for the JPEG image buffer.
  * @param[out] jpegLength Reference to size_t for the JPEG length.
@@ -79,6 +91,6 @@ bool captureAndCopyThermalData_Img(MLX90640Sensor& thermalSensor, float** therma
  * @param internalHumForLog Internal humidity to include in logs if logging directly.
  * @return True if successful.
  */
-bool captureVisualJPEG_Img(OV2640Sensor& visCamera, uint8_t** jpegImageBuffer, size_t& jpegLength, Config& cfg, API& api_obj, float internalTempForLog, float internalHumForLog);
+bool captureVisualJPEG_Img(SDManager& sdMgr, TimeManager& timeMgr, OV2640Sensor& visCamera, uint8_t** jpegImageBuffer, size_t& jpegLength, Config& cfg, API& api_obj, float internalTempForLog, float internalHumForLog);
 
 #endif // IMAGE_TASKS_H
