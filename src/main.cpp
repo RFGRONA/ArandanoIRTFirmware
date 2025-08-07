@@ -3,14 +3,20 @@
  * @file main.cpp
  * @brief Main application firmware for an ESP32-S3 based environmental and plant monitoring device.
  *
- * This firmware initializes various sensors, loads configuration, connects to WiFi,
- * periodically collects and sends data, manages internal temperature via fans,
- * and enters deep sleep. It utilizes modularized functions for better organization.
+ * This firmware operates in a continuous (always-on) cycle using a non-blocking state-machine-like loop.
+ * It initializes critical services (WiFi, NTP) and halts on failure.
+ * The main loop continuously performs quick checks (e.g., fan control). When a scheduled time arrives,
+ * it verifies API authentication, executes the full data collection cycle, and then schedules the next run.
+ * All deep sleep logic has been removed in favor of connection stability.
+ * All code, comments, and documentation are in English.
  */
 
 // --- Core Arduino and System Includes ---
 #include <Arduino.h>
-#include "esp_sleep.h"
+#include "nvs_flash.h"
+#include "esp_timer.h"
+#include <time.h>
+#include "esp_sntp.h"
 
 // --- Local Libraries (Project Specific Classes from lib/) ---
 #include "DHT22Sensor.h"
@@ -22,111 +28,136 @@
 #include "API.h"
 #include "DHT11Sensor.h"
 #include "ErrorLogger.h"
+#include "SDManager.h"
+#include "TimeManager.h"
+#include "FanController.h"
 
-// --- New Modularized Helper Files (from src/) ---
+// --- Modularized Helper Files (from src/) ---
 #include "ConfigManager.h"
 #include "SystemInit.h"
 #include "CycleController.h"
 #include "EnvironmentTasks.h"
 #include "ImageTasks.h"
-#include "FanController.h"  // For fan control
 
 // --- Hardware Pin Definitions ---
 #define I2C_SDA_PIN 47
 #define I2C_SCL_PIN 21
-#define DHT_EXTERNAL_PIN 14     // External DHT22 sensor pin
-#define DHT11_INTERNAL_PIN 41   // Internal DHT11 sensor pin
-#define FAN_RELAY_PIN 42        // Relay control pin for fans
+#define DHT_EXTERNAL_PIN 14
+#define DHT11_INTERNAL_PIN 41
+#define FAN_RELAY_PIN 42
 
-// --- Sleep Durations & Delays ---
-#define FAN_ON_ACTIVE_MONITOR_DELAY_MS 5000 // 5 seconds between temp checks when fans are actively cooling
-#define MIN_SLEEP_S 15                        // Minimum sleep duration to prevent rapid loops
+// --- Fan Control Thresholds ---
+#define FAN_ON_TEMP_C           20.0f
+#define FAN_OFF_TEMP_C          15.0f
+
+// --- Time & Connection Settings ---
+#define AUTH_MAX_RETRIES                5
+#define AUTH_RETRY_DELAY_MS             5000
+#define COLOMBIA_GMT_OFFSET_SEC         (-5 * 3600L)
+#define COLOMBIA_DAYLIGHT_OFFSET_SEC    0
+
+// --- Global Variables ---
+static time_t lastNtpSyncEpochTime = 0;
 
 // --- Global Object Instances ---
-// 'config' is defined in ConfigManager.cpp and declared extern in ConfigManager.h
-
-BH1750Sensor lightSensor(Wire);
-MLX90640Sensor thermalSensor(Wire);
-DHT22Sensor dhtExternalSensor(DHT_EXTERNAL_PIN);
-OV2640Sensor camera;
+SDManager sdManager;
+TimeManager timeManager;
 LEDStatus led;
 WiFiManager wifiManager;
 API* api_comm = nullptr;
 
+DHT22Sensor dhtExternalSensor(DHT_EXTERNAL_PIN);
 DHT11Sensor dhtInternalSensor(DHT11_INTERNAL_PIN);
+BH1750Sensor lightSensor(Wire);
+MLX90640Sensor thermalSensor(Wire);
+OV2640Sensor camera;
 FanController fanController(FAN_RELAY_PIN, false);
 
-// --- RTC Data for Sleep Management ---
-RTC_DATA_ATTR uint32_t nextMainDataCollectionDueTimeS_RTC = 0;
-
-// --- State Variables for Active Ventilation (Non-RTC, reset on each boot) ---
-bool activeVentilationInProgress = false;
-uint32_t ventilationStartUptimeS = 0;
+// --- State Variables ---
+static time_t nextDataCollectionEpochTime = 0;
+static bool continuousCoolingActive = false;
+static bool sdUsageWarning90PercentSent = false;
 
 // =========================================================================
 // ===                           SETUP FUNCTION                          ===
 // =========================================================================
 void setup() {
+    initSerial_Sys(); 
+
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[MainSetup] Initializing LED..."));
+    #endif
     led.begin();
     led.setState(ALL_OK);
 
-    initSerial_Sys(); // Inicializa Serial para debug
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[MainSetup] Initializing NVS..."));
+    #endif
+    esp_err_t ret_nvs = nvs_flash_init();
+    if (ret_nvs == ESP_ERR_NVS_NO_FREE_PAGES || ret_nvs == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret_nvs = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret_nvs);
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[MainSetup] NVS Initialized."));
+    #endif
 
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println(F("[MainSetup] Initializing Filesystem..."));
+        Serial.println(F("[MainSetup] Initializing LittleFS for config.json..."));
     #endif
-    if (!initFilesystem()) {
+    if (!initFilesystem()) { 
+        led.setState(ERROR_DATA); 
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[MainSetup] CRITICAL: Filesystem initialization failed. Halting."));
+            Serial.println(F("[MainSetup] CRITICAL: LittleFS init failed. Halting."));
         #endif
-        led.setState(ERROR_DATA);
         while(1) { delay(1000); }
     }
+    loadConfigurationFromFile(); 
 
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println(F("[MainSetup] Loading configuration..."));
+        Serial.println(F("[MainSetup] Initializing SD Card..."));
     #endif
-    loadConfigurationFromFile();
-
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("[MainSetup] Setting WiFi credentials in WiFiManager for SSID: " + config.wifi_ssid);
-    #endif
-    wifiManager.setCredentials(config.wifi_ssid, config.wifi_pass);
-
+    if (!sdManager.begin()) {
+        led.setState(ERROR_DATA); 
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[MainSetup] CRITICAL: SD Card init failed. Halting."));
+        #endif
+        while(1) { delay(1000); } 
+    }
+    
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("[MainSetup] Initializing API communication object..."));
     #endif
-    api_comm = new API(config.apiBaseUrl,
-                       config.apiActivatePath,
-                       config.apiAuthPath,
-                       config.apiRefreshTokenPath);
+    api_comm = new API(sdManager, config.apiBaseUrl, config.apiActivatePath, config.apiAuthPath, config.apiRefreshTokenPath);
     if (api_comm == nullptr) {
+        ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::ERROR, "API object allocation failed in setup.");
+        led.setState(ERROR_AUTH); 
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[MainSetup] CRITICAL: Failed to allocate memory for API object. Halting."));
+            Serial.println(F("[MainSetup] CRITICAL: API object allocation failed. Halting."));
         #endif
-        led.setState(ERROR_AUTH);
-        while(1) { delay(1000); }
+        delay(1800); // 30 minutes
+        ESP.restart();
     }
+    
+    // --- ROBUST STARTUP SEQUENCE ---
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[MainSetup] Executing robust WiFi startup..."));
+    #endif
+    initializeWiFi_Sys(wifiManager, led, config, api_comm, sdManager, timeManager, camera);
 
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println(F("[MainSetup] Obtaining MAC Address..."));
+        Serial.println(F("[MainSetup] Executing robust NTP startup..."));
     #endif
-    String macAddr = wifiManager.getMacAddress();
-    if (!macAddr.isEmpty()) {
-        api_comm->setDeviceMAC(macAddr);
+    if (!initializeNTP_Sys(timeManager, sdManager, api_comm, config, COLOMBIA_GMT_OFFSET_SEC, COLOMBIA_DAYLIGHT_OFFSET_SEC)) {
+        ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::ERROR, "NTP initialization failed in setup.");
+        led.setState(ERROR_TIMER);
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[MainSetup] MAC Address %s set in API object.\n", macAddr.c_str());
+            Serial.println(F("[MainSetup] CRITICAL: NTP init failed. Halting."));
         #endif
-    } else {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[MainSetup] WARNING: Could not obtain MAC address."));
-        #endif
+        delay(1800); // 30 minutes
+        ESP.restart();
     }
-
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println(F("[MainSetup] Initializing WiFiManager..."));
-    #endif
-    wifiManager.begin();
 
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("[MainSetup] Initializing Internal DHT11 Sensor..."));
@@ -136,296 +167,239 @@ void setup() {
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("[MainSetup] Initializing Fan Controller..."));
     #endif
-    fanController.begin();
+    fanController.begin(); 
 
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("[MainSetup] Initializing I2C bus..."));
     #endif
-    initI2C_Sys(I2C_SDA_PIN, I2C_SCL_PIN);
+    initI2C_Sys(I2C_SDA_PIN, I2C_SCL_PIN); 
 
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("[MainSetup] Initializing external sensors..."));
     #endif
-    if (!initializeSensors_Sys(dhtExternalSensor, lightSensor, thermalSensor, camera)) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[MainSetup] External sensor initialization failed."));
-        #endif
+    if (!initializeSensors_Sys(dhtExternalSensor, lightSensor, thermalSensor, camera)) { 
+        ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::ERROR, "External sensor init failed in setup.");
         led.setState(ERROR_SENSOR);
-        handleSensorInitFailure_Sys(config.sleep_sec); 
+        handleSensorInitFailure_Sys();
     }
-
-    if (nextMainDataCollectionDueTimeS_RTC == 0) {
-         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[MainSetup] RTC target for sleep calc (nextMainDataCollectionDueTimeS_RTC) is 0 (first boot)."));
-         #endif
+    
+    String setupCompleteMsg = "Device setup completed. Initial Time: " + timeManager.getCurrentTimestampString();
+    if (api_comm && api_comm->isActivated()){
+         ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), LOG_TYPE_INFO, setupCompleteMsg, NAN, NAN);
+    } else {
+         ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::INFO, setupCompleteMsg, NAN, NAN);
     }
 
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("--------------------------------------"));
-        Serial.println(F("[MainSetup] Device setup completed successfully."));
+        Serial.println(setupCompleteMsg);
         Serial.println(F("--------------------------------------"));
     #endif
-    led.setState(ALL_OK);
-    delay(1000);
 }
 
-// =========================================================================
+//=========================================================================
 // ===                            MAIN LOOP                              ===
 // =========================================================================
 void loop() {
-    unsigned long cycleStartTimeMs = millis();
-    uint32_t currentDeviceUptimeS = esp_timer_get_time() / 1000000ULL;
-    uint32_t awakeTimeThisCycleS = 0;
-    bool cycleStatusOK = true; 
 
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println(F("\n======================================"));
-        Serial.printf("--- Starting New Cycle (Uptime: %u s) ---\n", currentDeviceUptimeS);
-        Serial.printf("[MainLoopStart] Total Free PSRAM: %u bytes.\n", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-        Serial.printf("[MainLoopStart] Largest Free Contiguous PSRAM Block: %u bytes.\n", heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
-    #endif
-
-    // --- Main Data Collection Decision ---
-    bool performMainDataTasksThisCycle = false;
-    esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
-
-    if (wakeup_cause == ESP_SLEEP_WAKEUP_TIMER) {
-        performMainDataTasksThisCycle = true;
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[MainLoop] Woke up by timer, data collection is due."));
-        #endif
-    } else if (wakeup_cause == ESP_SLEEP_WAKEUP_UNDEFINED && nextMainDataCollectionDueTimeS_RTC == 0) {
-        performMainDataTasksThisCycle = true;
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[MainLoop] First boot or non-deep-sleep reset (RTC=0), performing data collection."));
-        #endif
-    } else if (wakeup_cause != ESP_SLEEP_WAKEUP_TIMER && wakeup_cause != ESP_SLEEP_WAKEUP_UNDEFINED) {
-        performMainDataTasksThisCycle = true;
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[MainLoop] Woke up by other reason (%d), performing data collection.\n", wakeup_cause);
-        #endif
-    }
-
-    if (wakeup_cause != ESP_SLEEP_WAKEUP_TIMER) {
-        performMainDataTasksThisCycle = true;
-        #ifdef ENABLE_DEBUG_SERIAL
-            if (wakeup_cause == ESP_SLEEP_WAKEUP_UNDEFINED) {
-                 Serial.println(F("[MainLoop] Wakeup cause UNDEFINED (likely first boot/flash), ensuring data collection."));
-            } else {
-                 Serial.printf("[MainLoop] Wakeup cause %d (not timer), ensuring data collection.\n", wakeup_cause);
+    // --- 1. Quick, continuous checks (runs on every single loop pass) ---
+    float internalTemp = dhtInternalSensor.readTemperature();
+    // Fan Control remains here to be responsive.
+    if (!isnan(internalTemp)) {
+        if (continuousCoolingActive) {
+            if (internalTemp < FAN_OFF_TEMP_C) {
+                fanController.turnOff();
+                continuousCoolingActive = false;
             }
-        #endif
-    }
-
-
-    #ifdef ENABLE_DEBUG_SERIAL
-        if (activeVentilationInProgress) {
-            Serial.println(F("[MainLoop] Mode: ACTIVE VENTILATION."));
         } else {
-            Serial.println(F("[MainLoop] Mode: DEEP SLEEP CYCLE."));
+            if (internalTemp > FAN_ON_TEMP_C) {
+                fanController.turnOn();
+                continuousCoolingActive = true;
+            }
         }
-        Serial.printf("[MainLoop] RTC Value (nextMainDataCollectionDueTimeS_RTC) for sleep calc: %u s\n", nextMainDataCollectionDueTimeS_RTC);
-    #endif
-
-    if (!activeVentilationInProgress && wakeup_cause == ESP_SLEEP_WAKEUP_TIMER) {
-        ledBlink_Ctrl(led);
     }
 
-    float currentInternalTemp = dhtInternalSensor.readTemperature();
-    float currentInternalHum = dhtInternalSensor.readHumidity();
+    // --- 2. Timing Gate: Check if it's time to run the data collection cycle ---
+    time_t currentTime = timeManager.getCurrentEpochTime();
+    if (currentTime < nextDataCollectionEpochTime) {
+        delay(1000); 
+        return; // Not time yet, restart loop.
+    }
+
+    // --- 3. It's time to run: Execute the full data collection and maintenance cycle ---
     #ifdef ENABLE_DEBUG_SERIAL
-        if (isnan(currentInternalTemp)) Serial.println(F("[MainLoop] Failed to read internal temperature."));
-        else Serial.printf("[MainLoop] Internal Temp: %.2f C, Hum: %.2f %%\n", currentInternalTemp, currentInternalHum);
+        Serial.println(F("\n[MainLoop] >>> Starting Data Collection Cycle <<<"));
     #endif
 
-    if (!isnan(currentInternalTemp)) {
-        fanController.controlTemperature(currentInternalTemp);
-    }
-    // ... (Actualización del LED basada en el estado del ventilador, como lo tenías)
+    ledBlink_Ctrl(led);
+    led.setState(ALL_OK);
+    
+    // --- 3A. Backend & Auth Check with new granular logic ---
+    bool proceedWithDataCollection = false; // Default to not proceeding until a valid state is confirmed.
+    float internalHumForAuth = dhtInternalSensor.readHumidity();
 
-    // --- Active Ventilation Mode Logic (MODIFICADA PARA PROBLEMA 1 DE PREGUNTA ANTERIOR) ---
-    if (activeVentilationInProgress) {
-        if (!fanController.isOn()) fanController.turnOn();
-        // ... (led state) ...
-        if (!isnan(currentInternalTemp) && currentInternalTemp < INTERNAL_LOW_TEMP_OFF) {
-            activeVentilationInProgress = false;
-            fanController.turnOff();
-            // ... (led state, log, delay) ...
-            // NO HAY RETURN AQUÍ, permite que continúe para posible toma de datos o cálculo de sueño
-        } else { // Temperatura aún alta
-            // Si performMainDataTasksThisCycle es true, las tareas de datos se ejecutarán más abajo.
-            // Si NO es momento de tareas de datos (porque la ventilación está en un sub-ciclo de monitoreo),
-            // entonces sí hacemos return para un ciclo corto.
-            // ¿Cómo sabemos si es un sub-ciclo?
-            // Por ahora, la lógica original era:
-            // bool needsDataCollectionDuringVentilation = (nextMainDataCollectionDueTimeS_RTC == 0 || currentDeviceUptimeS >= nextMainDataCollectionDueTimeS_RTC);
-            // Esta condición `needsDataCollectionDuringVentilation` ya no es confiable.
-            // Con `performMainDataTasksThisCycle = true` al despertar, las tareas se harán.
-            // El `return` aquí solo debería ocurrir si las tareas YA se hicieron en este ciclo de "despierto"
-            // y solo estamos monitoreando. Esto se maneja en la sección "Post-Data Collection Ventilation Check".
-            // Así que aquí, si la temperatura sigue alta, simplemente dejamos que el flujo continúe.
-             #ifdef ENABLE_DEBUG_SERIAL
-                Serial.println(F("[MainLoop] Ventilation active, temp high. Proceeding with main cycle flow."));
+    for (int attempt = 1; attempt <= AUTH_MAX_RETRIES; ++attempt) {
+        int resultCode = 0;
+
+        if (!api_comm->isActivated()) {
+            // Activation is a critical preliminary step. If this fails, we can't proceed.
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[MainLoop] Device not activated. Attempting activation (%d/%d)...\n", attempt, AUTH_MAX_RETRIES);
+            #endif
+            if (handleApiAuthenticationAndActivation_Ctrl(sdManager, timeManager, config, *api_comm, led, internalTemp, internalHumForAuth)) {
+                proceedWithDataCollection = true; // Activation successful!
+                break;
+            }
+        } else {
+            // Device is activated, so we can perform the standard auth check.
+            resultCode = api_comm->checkBackendAndAuth();
+            
+            if (resultCode >= 200 && resultCode < 300) {
+                proceedWithDataCollection = true; // Success!
+                break;
+            }
+
+            if (resultCode >= 500 || resultCode < 0) { // Server is down or unreachable.
+                #ifdef ENABLE_DEBUG_SERIAL
+                    Serial.println("[MainLoop] Backend appears offline. Proceeding to collect data for pending queue.");
+                #endif
+                proceedWithDataCollection = true; // Per new logic, we proceed anyway.
+                break; // Don't retry if server is down, just break and continue the cycle.
+            }
+            
+            // Any other error (likely 4xx) is a critical auth failure that requires retrying.
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[MainLoop] Auth check failed with client-side error (Code: %d). Retrying (%d/%d)...\n", resultCode, attempt, AUTH_MAX_RETRIES);
             #endif
         }
-    } else { // Not currently in activeVentilationInProgress
-        if (!isnan(currentInternalTemp) && currentInternalTemp > INTERNAL_HIGH_TEMP_ON) {
-            activeVentilationInProgress = true;
-            ventilationStartUptimeS = currentDeviceUptimeS;
-            fanController.turnOn();
+
+        // If we are here, it means a critical auth/activation error occurred, and we should retry.
+        if (attempt < AUTH_MAX_RETRIES) {
+            delay(AUTH_RETRY_DELAY_MS);
         }
     }
 
-    // --- WiFi, API, y Toma de Datos ---
-    String logUrl = api_comm ? api_comm->getBaseApiUrl() + config.apiLogPath : "";
-    if (performMainDataTasksThisCycle || (activeVentilationInProgress && (nextMainDataCollectionDueTimeS_RTC == 0 || currentDeviceUptimeS >= nextMainDataCollectionDueTimeS_RTC)) ) {
-
+    // --- 3B. Execute or Skip Cycle based on Auth Check ---
+    if (!proceedWithDataCollection) {
+        // This only happens if activation or a critical auth check (like 4xx) fails all retries.
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[MainLoop] Proceeding with WiFi/API checks..."));
+            Serial.println(F("[MainLoop] CRITICAL: Cannot authenticate or activate. Skipping cycle and retrying later."));
         #endif
-        wifiManager.handleWiFi();
-        if (!ensureWiFiConnected_Ctrl(wifiManager, led, 20000)) {
-            ErrorLogger::sendLog(logUrl, api_comm ? api_comm->getAccessToken() : "", LOG_TYPE_ERROR, "WiFi connection failed.", currentInternalTemp, currentInternalHum);
-            prepareForSleep_Ctrl(false, led, camera);
-            deepSleep_Ctrl(60, &led);
-            return;
-        }
-        if (!handleApiAuthenticationAndActivation_Ctrl(config, *api_comm, led, currentInternalTemp, currentInternalHum)) {
-            prepareForSleep_Ctrl(false, led, camera);
-            unsigned long sleepApiFailS = api_comm->getDataCollectionTimeMinutes();
-            if (sleepApiFailS <=0) sleepApiFailS = config.sleep_sec; else sleepApiFailS = (sleepApiFailS > 5 ? sleepApiFailS * 60 : 5 * 60);
-            deepSleep_Ctrl(sleepApiFailS, &led);
-            return;
-        }
-        // ... (actualizar LED si API OK) ...
+        ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::ERROR, "Critical Auth/Activation failed. Cycle skipped.");
+        led.setState(ERROR_AUTH);
+        
+        // Schedule next attempt after the standard interval
+        unsigned long intervalMinutes = api_comm->getDataCollectionTimeMinutes() > 0 ? api_comm->getDataCollectionTimeMinutes() : config.data_interval_minutes;
+        nextDataCollectionEpochTime = timeManager.getCurrentEpochTime() + (intervalMinutes * 60);
+        return; // Skip the rest of this cycle.
     }
+    
+    // --- 3C. Data Capture ---
+    float lightLevel = lightSensor.readLightLevel();
 
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.printf("[MainLoop] Current Time: %s\n", timeManager.getCurrentTimestampString().c_str());
+    #endif
 
-    // --- Main Data Collection Execution ---
-    unsigned long mainDataIntervalS_target = api_comm->getDataCollectionTimeMinutes();
-    if (mainDataIntervalS_target == 0) {
-        // Asigna un valor por defecto si la API no devuelve uno o es 0
-        // Necesitas definir DEFAULT_DATA_COLLECTION_MINUTES en alguna parte
-        // Por ejemplo, #define DEFAULT_DATA_COLLECTION_MINUTES 5
-        mainDataIntervalS_target = config.sleep_sec / 60; // O usa el sleep_sec de config
-        if (mainDataIntervalS_target == 0) mainDataIntervalS_target = 1; // Asegurar al menos 1 minuto
-         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[MainLoop] API data collection interval is 0, using default/config: %lu minutes\n", mainDataIntervalS_target);
-         #endif
+    bool cycleStatusOK = true;
+
+    // perform...Tasks functions will internally handle failed sends by saving to pending.
+    if (!performEnvironmentTasks_Env(sdManager, timeManager, config, *api_comm, lightSensor, dhtExternalSensor, led, internalTemp, internalHumForAuth)) {
+        cycleStatusOK = false;
     }
-    mainDataIntervalS_target *= 60; // Convertir a segundos
-
-
+    
     uint8_t* localJpegImage = nullptr;
     size_t localJpegLength = 0;
     float* localThermalData = nullptr;
-
-    // La decisión de `performMainDataTasksThisCycle` ya se tomó arriba basada en wakeup_cause
-    if (performMainDataTasksThisCycle) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[MainLoop] --- Performing Main Data Collection Tasks ---"));
-        #endif
-        LEDState previousLedStateBeforeData = led.getCurrentState();
-
-        if (!performEnvironmentTasks_Env(config, *api_comm, lightSensor, dhtExternalSensor, led, currentInternalTemp, currentInternalHum)) {
+    if (cycleStatusOK) {
+        if (!performImageTasks_Img(sdManager, timeManager, config, *api_comm, camera, thermalSensor, led, 
+                                               lightLevel,
+                                               &localJpegImage, localJpegLength, &localThermalData, internalTemp, internalHumForAuth)) {
             cycleStatusOK = false;
         }
-        if (cycleStatusOK) {
-            if (!performImageTasks_Img(config, *api_comm, camera, thermalSensor, led,
-                                       &localJpegImage, localJpegLength, &localThermalData, currentInternalTemp, currentInternalHum)) {
-                cycleStatusOK = false;
-            }
-        }
+    }
+    
+    // --- 3D. End-of-Cycle Signaling & Cleanup ---
+    const char* logType = cycleStatusOK ? LOG_TYPE_INFO : LOG_TYPE_WARNING;
+    String logMessage = cycleStatusOK ? "Main data cycle completed successfully." : "Main data cycle completed with errors.";
+    ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), logType, logMessage, internalTemp, internalHumForAuth);
+    
+    ledBlink_Ctrl(led);
+    led.setState(OFF);
 
-        if (localJpegImage || localThermalData) {
-            cleanupImageBuffers_Ctrl(localJpegImage, localThermalData);
-            localJpegImage = nullptr;
-            localThermalData = nullptr;
-        }
+    // --- 3E. Maintenance Tasks ---
+    cleanupImageBuffers_Ctrl(localJpegImage, localThermalData);
 
-        if (cycleStatusOK) {
-            nextMainDataCollectionDueTimeS_RTC = currentDeviceUptimeS + mainDataIntervalS_target;
+    if (wifiManager.getConnectionStatus() == WiFiManager::CONNECTED) {
+        sdManager.processPendingApiCalls(*api_comm, timeManager, config, internalTemp, internalHumForAuth);
+    }
+    
+    if (sdManager.isSDAvailable()) {
+        sdManager.manageAllStorage(timeManager); 
+        
+        uint64_t sdUsed, sdTotal;
+        float usagePercent = sdManager.getUsageInfo(sdUsed, sdTotal);
+        if (usagePercent >= 90.0f && !sdUsageWarning90PercentSent) {
+            String msg = "CRITICAL WARNING: SD Card usage is at " + String(usagePercent, 1) + "%";
+            ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), LOG_TYPE_WARNING, msg, internalTemp, internalHumForAuth);
+            sdUsageWarning90PercentSent = true;
+        } else if (usagePercent < 85.0f && sdUsageWarning90PercentSent) {
+            String msg = "INFO: SD Card usage is now " + String(usagePercent, 1) + "%. Warning resolved.";
+            ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), LOG_TYPE_INFO, msg, internalTemp, internalHumForAuth);
+            sdUsageWarning90PercentSent = false;
+        }
+    }
+
+    // --- 3F. NTP Sync Check ---
+    time_t currentTimeForSyncCheck = timeManager.getCurrentEpochTime();
+    
+    // Check if more than 1 hour has passed since the last NTP sync check
+    if ((currentTimeForSyncCheck - lastNtpSyncEpochTime) > 3600) {
+        if (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET) {
             #ifdef ENABLE_DEBUG_SERIAL
-                Serial.printf("[MainLoop] Main data tasks SUCCEEDED. Next collection due at RTC uptime target: %u. (current_uptime %u + interval %lu)\n",
-                              nextMainDataCollectionDueTimeS_RTC, currentDeviceUptimeS, mainDataIntervalS_target);
+                Serial.println(F("[TimeManager] WARNING: NTP sync has been lost! Attempting to re-initialize..."));
             #endif
+            led.setState(ERROR_TIMER);
+            initializeNTP_Sys(timeManager, sdManager, api_comm, config, COLOMBIA_GMT_OFFSET_SEC, COLOMBIA_DAYLIGHT_OFFSET_SEC);
+
         } else {
-            nextMainDataCollectionDueTimeS_RTC = currentDeviceUptimeS + MIN_SLEEP_S;
             #ifdef ENABLE_DEBUG_SERIAL
-                Serial.printf("[MainLoop] Main data tasks FAILED. Scheduling quick retry. Next collection due at RTC uptime target: %u. (current_uptime %u + min_sleep %d)\n",
-                              nextMainDataCollectionDueTimeS_RTC, currentDeviceUptimeS, MIN_SLEEP_S);
+                Serial.println(F("[TimeManager] Periodic NTP check: Sync status is OK."));
             #endif
         }
-        ErrorLogger::sendLog(logUrl, api_comm->getAccessToken(), cycleStatusOK ? LOG_TYPE_INFO : LOG_TYPE_WARNING,
-                             cycleStatusOK ? "Main data collection cycle completed successfully." : "Main data collection cycle completed with errors.",
-                             currentInternalTemp, currentInternalHum);
-        // ... (Restaurar LED state) ...
-    } else {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[MainLoop] Main data tasks SKIPPED this cycle based on initial decision."));
-            // Si se saltaron las tareas, nextMainDataCollectionDueTimeS_RTC no se actualiza.
-            // El cálculo del sueño usará el valor de RTC persistente.
-        #endif
-        cycleStatusOK = true; // Considerar el ciclo OK si solo se saltaron tareas programadas para no hacerse.
+
+        lastNtpSyncEpochTime = timeManager.getCurrentEpochTime();
     }
 
-
-    // --- Post-Data Collection / Post-Ventilation-Decision Ventilation Check ---
-    if (activeVentilationInProgress) {
-        currentInternalTemp = dhtInternalSensor.readTemperature(); // Re-leer temperatura
-        if (!isnan(currentInternalTemp) && currentInternalTemp < INTERNAL_LOW_TEMP_OFF) {
-            activeVentilationInProgress = false;
-            fanController.turnOff();
-            // ... (led state, log, delay) ...
-        } else if (!isnan(currentInternalTemp)) { // Temp sigue alta
-            #ifdef ENABLE_DEBUG_SERIAL
-                Serial.printf("[MainLoop] Active ventilation CONTINUES (after data tasks or decision). Temp: %.1fC. Monitoring...\n", currentInternalTemp);
-            #endif
-            delay(FAN_ON_ACTIVE_MONITOR_DELAY_MS);
-            return; // Loop de nuevo para ventilación activa (NO VA A DORMIR)
-        }
+    
+    // --- 4. Schedule the NEXT data collection cycle ---
+    unsigned long intervalMinutes = api_comm->getDataCollectionTimeMinutes();
+    if (intervalMinutes == 0) {
+        intervalMinutes = config.data_interval_minutes;
     }
 
-    // --- Calculate and Enter Deep Sleep ---
-    unsigned long sleepDurationFinalS;
-    awakeTimeThisCycleS = (millis() - cycleStartTimeMs) / 1000;
+    time_t lastRunTime = timeManager.getCurrentEpochTime(); 
+    struct tm timeinfo;
+    localtime_r(&lastRunTime, &timeinfo);
 
-    if (nextMainDataCollectionDueTimeS_RTC > currentDeviceUptimeS) {
-        sleepDurationFinalS = nextMainDataCollectionDueTimeS_RTC - currentDeviceUptimeS;
-    } else {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[MainLoop] RTC target %u not in future of current uptime %u or RTC is 0. Calculating default sleep.\n",
-                          nextMainDataCollectionDueTimeS_RTC, currentDeviceUptimeS);
-        #endif
-        // Si RTC es 0 (primer boot y falló antes de fijar RTC) o si el tiempo ya pasó (currentUptime > RTC)
-        // Necesitamos un plan B para el sueño.
-        if (performMainDataTasksThisCycle && !cycleStatusOK) { // Si se intentaron datos y fallaron en este ciclo
-            sleepDurationFinalS = MIN_SLEEP_S;
-        } else { // Para otros casos (ej. primer boot sin RTC fijado, o RTC ya pasó)
-                 // Dormir por el intervalo principal menos el tiempo despierto, o MIN_SLEEP_S.
-            sleepDurationFinalS = mainDataIntervalS_target > awakeTimeThisCycleS ? mainDataIntervalS_target - awakeTimeThisCycleS : MIN_SLEEP_S;
-        }
-    }
+    int minutes_past_slot = timeinfo.tm_min % intervalMinutes;
+    int minutes_to_add = (minutes_past_slot == 0) ? intervalMinutes : (intervalMinutes - minutes_past_slot);
+    
+    time_t next_run_base_time = lastRunTime + (minutes_to_add * 60);
 
-    if (sleepDurationFinalS < MIN_SLEEP_S) {
-        sleepDurationFinalS = MIN_SLEEP_S;
-    }
-
-    // Lógica de "capping" que volviste a poner (con el buffer de +1 minuto)
-    if (mainDataIntervalS_target > 0 && sleepDurationFinalS > mainDataIntervalS_target) {
-        if (sleepDurationFinalS > mainDataIntervalS_target + (1 * 60)) {
-            sleepDurationFinalS = mainDataIntervalS_target + (1*60);
-            #ifdef ENABLE_DEBUG_SERIAL
-                Serial.printf("[MainLoop] Capping sleep duration to target interval + 1 min: %lu s.\n", sleepDurationFinalS);
-            #endif
-        }
+    localtime_r(&next_run_base_time, &timeinfo);
+    timeinfo.tm_sec = 0;
+    nextDataCollectionEpochTime = mktime(&timeinfo);
+    
+    if (nextDataCollectionEpochTime <= lastRunTime) {
+        nextDataCollectionEpochTime += (intervalMinutes * 60);
     }
 
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.printf("[MainLoop] RTC Value for sleep calc (nextMainDataCollectionDueTimeS_RTC): %u s\n", nextMainDataCollectionDueTimeS_RTC);
-        Serial.printf("[MainLoop] Awake time this cycle: %u s. Final determined sleep duration: %lu seconds.\n", awakeTimeThisCycleS, sleepDurationFinalS);
+        char time_buf[50];
+        localtime_r(&nextDataCollectionEpochTime, &timeinfo);
+        strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
+        Serial.printf("[MainLoop] <<< Cycle Complete >>> Next run scheduled for: %s\n\n", time_buf);
     #endif
-
-    prepareForSleep_Ctrl(cycleStatusOK, led, camera);
-    deepSleep_Ctrl(sleepDurationFinalS, &led);
 }
+
