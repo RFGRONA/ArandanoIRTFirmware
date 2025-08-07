@@ -93,11 +93,8 @@ void LEDStatus::setState(LEDState state) {
         case ERROR_WIFI:      // WiFi connection failed state
              setColor(255, 105, 180); // Pink
             break;
-        case TEMP_HIGH_FANS_ON:  // Internal temperature high, fans are ON
+        case ERROR_TIMER:  // Internal temperature high, fans are ON
             setColor(139, 0, 0);   // Dark Red 
-            break;
-        case TEMP_NORMAL_FANS_OFF: // Internal temperature normal, fans are OFF
-            setColor(173, 216, 230); // Light Blue 
             break;
         default:              // Handle any undefined or future states
             pixels.clear();
@@ -123,4 +120,5 @@ LEDState LEDStatus::getCurrentState() const {
 // - Turquoise / Light Blue (64, 224, 208) - A lighter blue than Pure Blue, but not as bright as Lime Green.
 // - Lime Green / Chartreuse (127, 255, 0) - A brighter green than Pure Green, but less saturated.
 // - Dark Orange (255, 140, 0) - A darker orange than the default Orange (255, 165, 0).
+// - Light Blue (173, 216, 230) - A very light blue, almost pastel, which can be used for a more subtle indication.
 // - Lighter and darker colors can be tested.

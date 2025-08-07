@@ -1,55 +1,71 @@
-/**
- * @file ErrorLogger.h
- * @brief Defines a utility class for sending structured log messages to a remote server.
- *
- * Provides a static method to format log messages (INFO, WARNING, ERROR) as JSON
- * and send them via an authenticated HTTP POST request.
- */
+// lib/ErrorLogger/ErrorLogger.h
 #ifndef ERRORLOGGER_H
 #define ERRORLOGGER_H
 
-#include <Arduino.h> // Required for String class
+#include <Arduino.h>
+
+// Forward declaration to ensure SDManager and its nested types are recognized
+class SDManager;
+class TimeManager;
+enum class LogLevel;
 
 // Define standard log types as const char* for efficiency and consistency
-const char LOG_TYPE_INFO[] = "INFO";
-const char LOG_TYPE_WARNING[] = "WARNING";
-const char LOG_TYPE_ERROR[] = "ERROR";
+// These should already be here from your existing ErrorLogger.h
+extern const char LOG_TYPE_INFO[];
+extern const char LOG_TYPE_WARNING[];
+extern const char LOG_TYPE_ERROR[];
 
-/**
- * @class ErrorLogger
- * @brief Utility class with a static method for sending log messages.
- *
- * This class handles formatting log data into JSON and POSTing it to a specified endpoint.
- * It requires the caller to provide the full URL, an access token for authorization,
- * the log type, and the message.
- */
 class ErrorLogger {
 public:
     /**
-     * @brief Sends a log message to the specified API endpoint.
+     * @brief Sends a log message locally to SD card and optionally to a remote API endpoint.
      *
-     * Constructs a JSON payload with the structure:
-     * `{"logType": "TYPE_HERE", "logMessage": "Your message here"}`
-     * Optionally includes `internalTemperature` and `internalHumidity` if valid values are provided.
-     * Sends it via HTTP POST to the given URL using an access token for authorization.
-     * The caller is responsible for ensuring WiFi is connected and the accessToken is valid
-     * before calling this method.
+     * Constructs a JSON payload for remote logging. Always attempts to save the log
+     * to the SD card first. If WiFi is connected and accessToken is provided,
+     * it then attempts to send the log to the specified API URL.
      *
+     * @param sdManager Reference to the SDManager instance for local logging.
+     * @param timeManager Reference to the TimeManager instance for timestamps.
      * @param fullLogUrl The complete URL (String) of the backend logging endpoint.
-     * @param accessToken The access token (String) for `Authorization: Device <token>` header.
-     * If empty, the request might be sent without authorization.
-     * @param logType The type of log (e.g., "INFO", "WARNING", "ERROR"). Use the predefined
-     * LOG_TYPE_INFO, LOG_TYPE_WARNING, LOG_TYPE_ERROR constants.
+     * @param accessToken The access token (String) for `Authorization: Device <token>` header for remote logging.
+     * If empty, remote logging might be attempted without authorization or skipped based on API behavior.
+     * @param logType The type of log (e.g., LOG_TYPE_INFO).
      * @param logMessage The detailed log message (String).
-     * @param internalTemp Optional. The internal temperature reading (float). Defaults to NAN.
-     * If NAN, this field will not be included in the JSON payload.
-     * @param internalHum Optional. The internal humidity reading (float). Defaults to NAN.
-     * If NAN, this field will not be included in the JSON payload.
-     * @return `true` if the log message was successfully sent AND the server responded with an
-     * HTTP 2xx status code. Returns `false` if the HTTP request fails, or if the server
-     * responds with a non-2xx status code, or if essential parameters are missing.
+     * @param internalTemp Optional. The internal temperature reading (float).
+     * @param internalHum Optional. The internal humidity reading (float).
+     * @return `true` if the log was successfully saved to SD. The success of remote sending is handled internally.
+     * Returns `false` if saving to SD fails or if essential parameters are missing for local logging.
      */
-    static bool sendLog(const String& fullLogUrl, const String& accessToken, const char* logType, const String& logMessage, float internalTemp = NAN, float internalHum = NAN);
+    static bool sendLog(SDManager& sdManager,        
+                       TimeManager& timeManager,      
+                       const String& fullLogUrl, 
+                       const String& accessToken, 
+                       const char* logType, 
+                       const String& logMessage, 
+                       float internalTemp = NAN, 
+                       float internalHum = NAN);
+
+/**
+     * @brief Sends a log message exclusively to the local SD card.
+     * This method does not attempt to send the log to any remote API.
+     * It's intended for critical local diagnostics or events where network
+     * connectivity is not available, not desired, or has failed.
+     *
+     * @param sdManager Reference to the SDManager instance for local logging.
+     * @param timeManager Reference to the TimeManager instance for timestamps.
+     * @param level The severity level of the log message (INFO, WARNING, ERROR from LogLevel enum in SDManager.h).
+     * @param logMessage The detailed log message (String).
+     * @param internalTemp Optional. The internal temperature reading (float).
+     * @param internalHum Optional. The internal humidity reading (float).
+     * @return `true` if the log was successfully saved to SD. 
+     * Returns `false` if saving to SD fails or if essential parameters are missing.
+     */
+    static bool logToSdOnly(SDManager& sdManager,
+                            TimeManager& timeManager,
+                            LogLevel level,
+                            const String& logMessage,
+                            float internalTemp = NAN,
+                            float internalHum = NAN);
 };
 
 #endif // ERRORLOGGER_H

@@ -9,9 +9,13 @@
 #include "API.h"
 #include "LEDStatus.h"
 #include "ConfigManager.h" 
+#include "SDManager.h"    
+#include "TimeManager.h"
 
 // --- Function Prototypes for EnvironmentTasks ---
 /** @brief Orchestrates reading environmental sensor data and sending it.
+ * @param sdMgr Reference to SDManager for logging and state management.
+ * @param timeMgr Reference to TimeManager for time synchronization.
  * @param cfg Reference to global Config.
  * @param api_obj Reference to the API object.
  * @param lightSensor Reference to BH1750 sensor.
@@ -21,7 +25,7 @@
  * @param internalHumForLog Internal humidity to include in logs.
  * @return True if data read AND sent successfully.
  */
-bool performEnvironmentTasks_Env(Config& cfg, API& api_obj, BH1750Sensor& lightSensor, DHT22Sensor& dhtSensor, LEDStatus& sysLed, float internalTempForLog, float internalHumForLog);
+bool performEnvironmentTasks_Env(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, BH1750Sensor& lightSensor, DHT22Sensor& dhtSensor, LEDStatus& sysLed, float internalTempForLog, float internalHumForLog);
 
 /** @brief Reads the light sensor value with retries.
  * @param lightSensor Reference to BH1750 sensor.
@@ -39,6 +43,8 @@ bool readLightSensorWithRetry_Env(BH1750Sensor& lightSensor, float &lightLevel);
 bool readDHTSensorWithRetry_Env(DHT22Sensor& dhtSensor, float &temperature, float &humidity);
 
 /** @brief Sends the collected environmental data to the configured server endpoint.
+ * @param sdMgr Reference to SDManager for logging and state management.
+ * @param timeMgr Reference to TimeManager for time synchronization.
  * @param cfg Reference to global Config.
  * @param api_obj Reference to the API object.
  * @param lightLevel The light level value.
@@ -49,7 +55,7 @@ bool readDHTSensorWithRetry_Env(DHT22Sensor& dhtSensor, float &temperature, floa
  * @param internalHumForLog Internal humidity to include in logs.
  * @return True if data sent successfully.
  */
-bool sendEnvironmentDataToServer_Env(Config& cfg, API& api_obj, float lightLevel, float temperature, float humidity, LEDStatus& sysLed, float internalTempForLog, float internalHumForLog); 
+bool sendEnvironmentDataToServer_Env(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, float lightLevel, float temperature, float humidity, LEDStatus& sysLed, float internalTempForLog, float internalHumForLog); 
 
 
 #endif // ENVIRONMENT_TASKS_H

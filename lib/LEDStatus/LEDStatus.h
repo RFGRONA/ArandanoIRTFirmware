@@ -26,10 +26,9 @@ enum LEDState {
     ERROR_DATA,      ///< State: Error processing or capturing data (e.g., image). Color: Cyan.
     TAKING_DATA,     ///< State: Currently performing measurements or capture. Color: Blue.
     SENDING_DATA,    ///< State: Currently sending data via HTTP. Color: Green.
-    CONNECTING_WIFI, ///< State: Attempting to connect to WiFi network. Color: Yelow.
+    CONNECTING_WIFI, ///< State: Attempting to connect to WiFi network. Color: Yellow.
     ERROR_WIFI,      ///< State: Failed to connect to WiFi network. Color: Pink.
-    TEMP_HIGH_FANS_ON,  ///< State: Internal temperature high, fans are ON. Color: Dark Orange/Amber. 
-    TEMP_NORMAL_FANS_OFF ///< State: Internal temperature normal, fans are OFF. Color: Light Blue. 
+    ERROR_TIMER      ///< State: Filed to sinchronize time. Color: Dark Orange/Amber.
 };
 
 /**

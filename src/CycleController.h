@@ -9,6 +9,8 @@
 #include "API.h"           
 #include "LEDStatus.h"     
 #include "OV2640Sensor.h"   
+#include "SDManager.h" 
+#include "TimeManager.h"
 
 // --- Function Prototypes for CycleController ---
 
@@ -31,6 +33,8 @@ bool ensureWiFiConnected_Ctrl(WiFiManager& wifiMgr, LEDStatus& sysLed, unsigned 
 void ledBlink_Ctrl(LEDStatus& sysLed);
 
 /** @brief Handles API authentication and activation, including token refresh.
+ * @param sdMgr Reference to the SDManager for persistent storage.
+ * @param timeMgr Reference to the TimeManager for time synchronization.
  * @param cfg A reference to the global Config structure.
  * @param api_obj A reference to the API object.
  * @param status_led A reference to the LEDStatus object.
@@ -38,7 +42,7 @@ void ledBlink_Ctrl(LEDStatus& sysLed);
  * @param internalHumForLog Internal humidity to include in logs.
  * @return true if the device is activated, authenticated, and ready.
  */
-bool handleApiAuthenticationAndActivation_Ctrl(Config& cfg, API& api_obj, LEDStatus& status_led, float internalTempForLog, float internalHumForLog);
+bool handleApiAuthenticationAndActivation_Ctrl(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, LEDStatus& status_led, float internalTempForLog, float internalHumForLog);
 
 /** @brief Frees allocated memory buffers for JPEG image and thermal data.
  * Does NOT deinitialize the camera.
@@ -46,20 +50,5 @@ bool handleApiAuthenticationAndActivation_Ctrl(Config& cfg, API& api_obj, LEDSta
  * @param thermalData Pointer to the thermal data buffer (will be freed).
  */
 void cleanupImageBuffers_Ctrl(uint8_t* jpegImage, float* thermalData);
-
-/** @brief Performs final actions before entering deep sleep.
- * Sets LED status, performs final blink, and unmounts LittleFS.
- * @param cycleStatusOK Boolean indicating if the main loop cycle completed without errors.
- * @param sysLed Reference to LEDStatus.
- * @param visCamera Reference to the OV2640 visual camera object to be deinitialized.
- */
-void prepareForSleep_Ctrl(bool cycleStatusOK, LEDStatus& sysLed, OV2640Sensor& visCamera); 
-
-/** @brief Enters ESP32 deep sleep for a specified duration.
- * Turns off LED (if provided and not null) and enables timer wakeup. This function does not return.
- * @param seconds The duration to sleep in seconds.
- * @param sysLed Optional pointer to LEDStatus to turn it off. Can be nullptr.
- */
-void deepSleep_Ctrl(unsigned long seconds, LEDStatus* sysLed); 
 
 #endif // CYCLE_CONTROLLER_H

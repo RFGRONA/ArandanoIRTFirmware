@@ -1,7 +1,4 @@
-/**
- * @file FanController.cpp
- * @brief Implements the FanController class methods.
- */
+// lib/FanController/FanController.cpp
 #include "FanController.h"
 
 /**
@@ -31,9 +28,9 @@ void FanController::begin() {
     digitalWrite(_relayPin, _turnOffSignal); // Ensure fan is off initially
     _isFanOn = false;
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.printf("[FanCtrl] Initialized on pin %d. Fan OFF. Relay logic: %s (ON signal: %s)\n",
+        Serial.printf("[FanCtrl] Initialized on pin %d. Fan set to OFF. Relay logic: %s (ON signal: %s).\n",
                       _relayPin,
-                      _normallyOpenRelay ? "Normally Open" : "Normally Closed",
+                      _normallyOpenRelay ? "Normally Open (Active HIGH)" : "Normally Closed (Active LOW)",
                       _turnOnSignal == HIGH ? "HIGH" : "LOW");
     #endif
 }
@@ -42,55 +39,32 @@ void FanController::begin() {
  * @brief Turns the fan ON.
  */
 void FanController::turnOn() {
-    digitalWrite(_relayPin, _turnOnSignal);
-    _isFanOn = true;
-    // #ifdef ENABLE_DEBUG_SERIAL
-    //     Serial.printf("[FanCtrl] Pin %d set to %s. Fan turned ON.\n", _relayPin, _turnOnSignal == HIGH ? "HIGH" : "LOW");
-    // #endif
+    if (!_isFanOn) { // Only act if currently off to avoid redundant writes and logs
+        digitalWrite(_relayPin, _turnOnSignal);
+        _isFanOn = true;
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[FanCtrl] Pin %d set to %s. Fan commanded ON.\n", _relayPin, _turnOnSignal == HIGH ? "HIGH" : "LOW");
+        #endif
+    }
 }
 
 /**
  * @brief Turns the fan OFF.
  */
 void FanController::turnOff() {
-    digitalWrite(_relayPin, _turnOffSignal);
-    _isFanOn = false;
-    // #ifdef ENABLE_DEBUG_SERIAL
-    //     Serial.printf("[FanCtrl] Pin %d set to %s. Fan turned OFF.\n", _relayPin, _turnOffSignal == HIGH ? "HIGH" : "LOW");
-    // #endif
+    if (_isFanOn) { // Only act if currently on
+        digitalWrite(_relayPin, _turnOffSignal);
+        _isFanOn = false;
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[FanCtrl] Pin %d set to %s. Fan commanded OFF.\n", _relayPin, _turnOffSignal == HIGH ? "HIGH" : "LOW");
+        #endif
+    }
 }
 
 /**
- * @brief Checks if the fan is currently ON.
- * @return True if the fan is ON, false otherwise.
+ * @brief Checks if the fan is currently commanded to be ON.
+ * @return True if the fan's last command was ON, false otherwise.
  */
 bool FanController::isOn() const {
     return _isFanOn;
-}
-
-/**
- * @brief Controls the fan based on current temperature and defined thresholds.
- * Implements hysteresis to prevent rapid cycling.
- * @param currentTemperature The current internal temperature.
- */
-void FanController::controlTemperature(float currentTemperature) {
-    if (isnan(currentTemperature)) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("[FanCtrl] Invalid temperature (NAN) received. No action taken.");
-        #endif
-        return; // Do nothing if temperature reading is invalid
-    }
-
-    if (!_isFanOn && currentTemperature > INTERNAL_HIGH_TEMP_ON) {
-        turnOn();
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[FanCtrl] Temp (%.1fC) > Threshold_ON (%.1fC). Turning FAN ON.\n", currentTemperature, INTERNAL_HIGH_TEMP_ON);
-        #endif
-    } else if (_isFanOn && currentTemperature < INTERNAL_LOW_TEMP_OFF) {
-        turnOff();
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[FanCtrl] Temp (%.1fC) < Threshold_OFF (%.1fC). Turning FAN OFF.\n", currentTemperature, INTERNAL_LOW_TEMP_OFF);
-        #endif
-    }
-    // No action if temperature is between thresholds, maintaining current fan state (hysteresis)
 }

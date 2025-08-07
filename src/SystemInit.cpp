@@ -1,8 +1,17 @@
 // src/SystemInit.cpp
 #include "SystemInit.h"
 #include <Wire.h>         // For I2C initialization
-#include "esp_sleep.h"   // For deepSleep in handleSensorInitFailure_Sys
 #include <LittleFS.h>     // For LittleFS.end() in handleSensorInitFailure_Sys
+#include "ErrorLogger.h" // For error logging
+
+// --- Definitions for robust startup routines ---
+#define WIFI_SETUP_MAX_RETRIES 5
+#define WIFI_SETUP_INITIAL_BACKOFF_S 4  // Initial delay between retries in seconds
+#define WIFI_SETUP_MAX_BACKOFF_S 30     // Maximum delay between retries in seconds
+
+#define NTP_SETUP_MAX_RETRIES 5
+#define NTP_SETUP_RETRY_DELAY_MS 2000
+
 
 /**
  * @brief Initializes the Serial port for debugging output if ENABLE_DEBUG_SERIAL is defined.
@@ -107,16 +116,14 @@ bool initializeSensors_Sys(DHT22Sensor& dht, BH1750Sensor& light, MLX90640Sensor
 
 /**
  * @brief Handles the failure scenario during sensor initialization in setup().
- * Unmounts LittleFS and enters deep sleep. This function does not return.
+ * This function now halts the device in a while(1) loop instead of sleeping.
  * The LED error state should be set by the caller before invoking this function.
- * @param sleepSeconds_cfg The duration to sleep, typically from the global config.
  */
-void handleSensorInitFailure_Sys(int sleepSeconds_cfg) {
+void handleSensorInitFailure_Sys() {
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("[SysInit] CRITICAL ERROR: Sensor initialization failed. Preparing for deep sleep.");
-        Serial.println("[SysInit] LED error state should have been set by caller.");
+        Serial.println(F("[SysInit] CRITICAL ERROR: Sensor initialization failed. Halting execution."));
+        Serial.println(F("[SysInit] LED error state should have been set by caller."));
     #endif
-    // Delay for LED visibility is handled by the caller if desired
 
     LittleFS.end();
     #ifdef ENABLE_DEBUG_SERIAL
@@ -125,12 +132,163 @@ void handleSensorInitFailure_Sys(int sleepSeconds_cfg) {
     delay(500);
 
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.printf("[SysInit] Entering deep sleep for %d seconds...\n", sleepSeconds_cfg);
+        Serial.println(F("--- SYSTEM HALTED ---"));
         Serial.flush();
-        delay(100);
     #endif
-    // Caller should turn off LED if needed before deep sleep, or deepSleep_Ctrl can do it.
-    // For now, this function just triggers the sleep.
-    esp_sleep_enable_timer_wakeup((uint64_t)sleepSeconds_cfg * 1000000ULL);
-    esp_deep_sleep_start();
+    // Halt the system. A watchdog timer will eventually reset the device.
+    while(1) {
+        delay(1000);
+    }
+}
+
+/**
+ * @brief Initializes and robustly connects to WiFi with retries and exponential backoff.
+ * This function is now blocking and will halt the device on critical failure.
+ * @return True if WiFi connected successfully. Halts on failure, so it doesn't return false.
+ */
+bool initializeWiFi_Sys(WiFiManager& wifiMgr, LEDStatus& led, Config& cfg, API* api_comm, 
+                        SDManager& sdMgr, TimeManager& timeMgr, OV2640Sensor& visCamera) {
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[SysInit_WiFi] Initializing WiFiManager and setting credentials..."));
+    #endif
+    wifiMgr.begin();
+    wifiMgr.setCredentials(cfg.wifi_ssid, cfg.wifi_pass);
+
+    if (api_comm != nullptr) { 
+        String macAddr = wifiMgr.getMacAddress();
+        if (!macAddr.isEmpty()) {
+            api_comm->setDeviceMAC(macAddr);
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[SysInit_WiFi] MAC Address %s set in API object.\n", macAddr.c_str());
+            #endif
+        } else {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println(F("[SysInit_WiFi] WARNING: Could not obtain MAC address for API object."));
+            #endif
+        }
+    }
+
+    led.setState(CONNECTING_WIFI);
+    unsigned long backoffDelayS = WIFI_SETUP_INITIAL_BACKOFF_S;
+    
+    for (int attempt = 1; attempt <= WIFI_SETUP_MAX_RETRIES; ++attempt) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[SysInit_WiFi] Connection attempt #%d/%d...\n", attempt, WIFI_SETUP_MAX_RETRIES);
+        #endif
+        
+        wifiMgr.connectToWiFi(); // This is a non-blocking call that starts the connection process
+
+        // Wait for connection with a timeout
+        unsigned long attemptStartTime = millis();
+        while (millis() - attemptStartTime < WIFI_CONNECT_TIMEOUT) {
+            // wifiMgr.handleWiFi() is not needed here as we use event-driven status
+            if (wifiMgr.getConnectionStatus() == WiFiManager::CONNECTED) {
+                #ifdef ENABLE_DEBUG_SERIAL
+                    Serial.println(F("[SysInit_WiFi] WiFi connected successfully."));
+                #endif
+                led.setState(ALL_OK);
+                return true;
+            }
+            delay(100);
+        }
+
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[SysInit_WiFi] Attempt #%d timed out after %d ms.\n", attempt, WIFI_CONNECT_TIMEOUT);
+        #endif
+
+        if (attempt < WIFI_SETUP_MAX_RETRIES) {
+            led.setState(ERROR_WIFI);
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[SysInit_WiFi] Waiting for %lu seconds before retrying...\n", backoffDelayS);
+            #endif
+            delay(backoffDelayS * 1000);
+            backoffDelayS = min(backoffDelayS * 2, (unsigned long)WIFI_SETUP_MAX_BACKOFF_S); // Exponential backoff with a cap
+            led.setState(CONNECTING_WIFI);
+        }
+    }
+    
+    // All retries failed, this is a critical failure.
+    String errorMsg = "CRITICAL: All WiFi connection attempts failed. Halting.";
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("[SysInit_WiFi] " + errorMsg);
+    #endif
+    led.setState(ERROR_WIFI);
+    ErrorLogger::logToSdOnly(sdMgr, timeMgr, LogLevel::ERROR, errorMsg);
+    
+    // Halt the system
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("--- SYSTEM HALTED ---"));
+        Serial.flush();
+    #endif
+    while(1) {
+        delay(1000);
+    }
+
+    return false; // Should not be reached
+}
+
+
+/**
+ * @brief Initializes and robustly syncs NTP time with retries.
+ * This function is blocking and will halt the device on critical failure.
+ * Assumes WiFi is already connected.
+ * @return True if NTP sync was successful. Halts on failure, so it doesn't return false.
+ */
+bool initializeNTP_Sys(TimeManager& timeMgr, SDManager& sdMgr, API* api_comm, Config& cfg,
+                       long gmtOffset_sec, int daylightOffset_sec) {
+    if (WiFi.status() != WL_CONNECTED) {
+         #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[SysInit_NTP] FATAL: WiFi not connected. Cannot sync NTP. Halting."));
+         #endif
+         // This should not happen if initializeWiFi_Sys is called first and succeeds.
+        delay(3600000UL); // 1 hour
+        ESP.restart();
+    }
+
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[SysInit_NTP] Initializing TimeManager and starting NTP sync..."));
+    #endif
+    timeMgr.begin(DEFAULT_NTP_SERVER_1, DEFAULT_NTP_SERVER_2, gmtOffset_sec, daylightOffset_sec);
+    
+    for (int attempt = 1; attempt <= NTP_SETUP_MAX_RETRIES; ++attempt) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[SysInit_NTP] NTP sync attempt #%d/%d...\n", attempt, NTP_SETUP_MAX_RETRIES);
+        #endif
+        if (timeMgr.syncNtpTime()) {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println("[SysInit_NTP] NTP time synchronized: " + timeMgr.getCurrentTimestampString());
+            #endif
+            // Log success to SD, not remotely, to avoid dependency loops if logging requires time.
+            ErrorLogger::logToSdOnly(sdMgr, timeMgr, LogLevel::INFO, "NTP time synchronized successfully at setup.");
+            return true;
+        }
+
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[SysInit_NTP] NTP sync attempt #%d failed.\n", attempt);
+        #endif
+
+        if (attempt < NTP_SETUP_MAX_RETRIES) {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[SysInit_NTP] Waiting for %d ms before retrying...\n", NTP_SETUP_RETRY_DELAY_MS);
+            #endif
+            delay(NTP_SETUP_RETRY_DELAY_MS);
+        }
+    }
+
+    // All retries failed
+    String errorMsg = "CRITICAL: All NTP time synchronization attempts failed. Halting.";
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("[SysInit_NTP] " + errorMsg);
+    #endif
+    // At this point, time is not synced, so the timestamp in the log will be uptime-based.
+    ErrorLogger::logToSdOnly(sdMgr, timeMgr, LogLevel::ERROR, errorMsg);
+
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("--- SYSTEM HALTED ---"));
+        Serial.flush();
+    #endif
+    delay(3600000UL); // 1 hour
+    ESP.restart();
+    
+    return false; // Should not be reached
 }

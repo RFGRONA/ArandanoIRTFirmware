@@ -1,7 +1,7 @@
 // src/CycleController.cpp
 #include "CycleController.h"
 #include <LittleFS.h>     
-#include "esp_sleep.h"   
+#include "nvs_flash.h" 
 #include "ErrorLogger.h"
 
 /**
@@ -84,7 +84,7 @@ void ledBlink_Ctrl(LEDStatus& sysLed) {
  * @param internalHumForLog Internal humidity to include in logs.
  * @return True if API is ready (activated and authenticated), false otherwise.
  */
-bool handleApiAuthenticationAndActivation_Ctrl(Config& cfg, API& api_obj, LEDStatus& status_led, float internalTempForLog, float internalHumForLog) { 
+bool handleApiAuthenticationAndActivation_Ctrl(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, LEDStatus& status_led, float internalTempForLog, float internalHumForLog) { 
     String logUrl = api_obj.getBaseApiUrl() + cfg.apiLogPath;
 
     if (!api_obj.isActivated()) {
@@ -99,17 +99,13 @@ bool handleApiAuthenticationAndActivation_Ctrl(Config& cfg, API& api_obj, LEDSta
             #ifdef ENABLE_DEBUG_SERIAL
                 Serial.println(F("[Ctrl_API] Activation successful (HTTP 200)."));
             #endif
-            ErrorLogger::sendLog(logUrl, api_obj.getAccessToken(), LOG_TYPE_INFO, 
-                                 "Device activated successfully. DeviceID: " + String(cfg.deviceId), 
-                                 internalTempForLog, internalHumForLog); 
+            ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, api_obj.getAccessToken(), LOG_TYPE_INFO, "Device activated successfully. DeviceID: " + String(cfg.deviceId), internalTempForLog, internalHumForLog);
         } else {
             #ifdef ENABLE_DEBUG_SERIAL
                 Serial.printf("[Ctrl_API] Activation failed. HTTP Code: %d\n", activationHttpCode);
             #endif
             status_led.setState(ERROR_AUTH);
-            ErrorLogger::sendLog(logUrl, "", LOG_TYPE_ERROR, 
-                                 "Device activation failed. HTTP Code: " + String(activationHttpCode) + ", DeviceID: " + String(cfg.deviceId), 
-                                 internalTempForLog, internalHumForLog); 
+            ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, "", LOG_TYPE_ERROR, "Device activation failed. HTTP Code: " + String(activationHttpCode) + ", DeviceID: " + String(cfg.deviceId), internalTempForLog, internalHumForLog);
             return false;
         }
     }
@@ -137,8 +133,7 @@ bool handleApiAuthenticationAndActivation_Ctrl(Config& cfg, API& api_obj, LEDSta
         if (!api_obj.isActivated()) { // api_obj.checkBackendAndAuth might deactivate on critical refresh failure
             errorMessage += ". Device has been deactivated.";
         }
-        ErrorLogger::sendLog(logUrl, api_obj.getAccessToken(), LOG_TYPE_ERROR, 
-                             errorMessage, internalTempForLog, internalHumForLog); 
+        ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, api_obj.getAccessToken(), LOG_TYPE_ERROR, errorMessage, internalTempForLog, internalHumForLog);
         return false;
     }
 }
@@ -174,72 +169,4 @@ void cleanupImageBuffers_Ctrl(uint8_t* jpegImage, float* thermalData) {
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("[Ctrl] Image buffers freed."));
     #endif
-}
-
-/**
- * @brief Performs final actions before entering deep sleep.
- * Sets LED status based on cycle success, performs blink, and unmounts LittleFS.
- * @param cycleStatusOK Boolean indicating if the main loop cycle completed without errors.
- * @param sysLed Reference to LEDStatus.
- */
-void prepareForSleep_Ctrl(bool cycleStatusOK, LEDStatus& sysLed, OV2640Sensor& visCamera) {
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("\n[Ctrl] --- Preparing for Deep Sleep ---");
-    #endif
-
-    if (cycleStatusOK) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("[Ctrl] Cycle completed successfully. Setting final LED to ALL_OK.");
-        #endif
-        if (sysLed.getCurrentState() != ERROR_DATA && sysLed.getCurrentState() != ERROR_SENSOR &&
-            sysLed.getCurrentState() != ERROR_SEND && sysLed.getCurrentState() != ERROR_AUTH &&
-            sysLed.getCurrentState() != ERROR_WIFI && sysLed.getCurrentState() != TEMP_HIGH_FANS_ON) {
-            sysLed.setState(ALL_OK);
-        }
-        delay(1000); // Show OK state or current state
-    } else {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[Ctrl] Cycle completed with errors. LED should reflect the last error encountered."));
-        #endif
-        // LED state should already be showing the last error.
-        delay(3000); // Show error state
-    }
-
-    ledBlink_Ctrl(sysLed);
-
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println(F("[Ctrl] Deinitializing camera peripheral before sleep..."));
-    #endif
-    delay(50); 
-    visCamera.end(); 
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println(F("[Ctrl] Camera deinitialized for sleep."));
-    #endif
-    delay(50); 
-
-    LittleFS.end();
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println(F("[Ctrl] Unmounted LittleFS filesystem."));
-    #endif
-}
-
-/**
- * @brief Enters ESP32 deep sleep mode for a specified number of seconds.
- * Turns off the status LED (if provided) before sleeping.
- * @param seconds The duration (unsigned long) to sleep in seconds.
- * @param sysLed Optional pointer to LEDStatus to turn it off.
- */
-void deepSleep_Ctrl(unsigned long seconds, LEDStatus* sysLed) {
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.printf("[Ctrl] Entering deep sleep for %lu seconds...\n", seconds);
-        Serial.println("--------------------------------------");
-        Serial.flush();
-        delay(100);
-    #endif
-    if (sysLed != nullptr) {
-        sysLed->turnOffAll();
-    }
-
-    esp_sleep_enable_timer_wakeup(seconds * 1000000ULL);
-    esp_deep_sleep_start();
 }

@@ -1,40 +1,55 @@
-/**
- * @file API.cpp
- * @brief Implements the API class methods for backend communication and NVS management.
- */
+// lib/API/API.cpp
 #include "API.h"
+#include "nvs_flash.h"
+#include "nvs.h"
+#include "FS.h"
+#include "SD_MMC.h"
+#include "esp_random.h"
+#include "mbedtls/aes.h" 
+#include "mbedtls/gcm.h"
+#include "mbedtls/base64.h"
+#include "ErrorLogger.h"
+#include "TimeManager.h"
+#include "ConfigManager.h"
+#include "EnvironmentDataJSON.h"
+#include "MultipartDataSender.h"
 
-// HTTP Timeout (milliseconds)
 #define HTTP_REQUEST_TIMEOUT 10000
 
-/**
- * @brief Constructor implementation.
- */
-API::API(const String& base_url, const String& activate_path, const String& auth_path, const String& refresh_path) :
+#define AES_GCM_IV_LENGTH 12  
+#define AES_GCM_TAG_LENGTH 16
+
+// JSON keys for the API state file on SD
+const char* JSON_KEY_ACCESS_TOKEN = "accessToken";
+const char* JSON_KEY_REFRESH_TOKEN = "refreshToken";
+const char* JSON_KEY_COLLECTION_TIME = "dataCollectionTime";
+const char* JSON_KEY_IS_ACTIVATED = "isActivated";
+
+// NVS definitions
+#define NVS_NAMESPACE "api_secure"
+#define NVS_AES_KEY_NAME "aes_key"
+
+API::API(SDManager& sdManager, const String& base_url, const String& activate_path, const String& auth_path, const String& refresh_path) :
+    _sdManagerRef(sdManager), 
     _apiBaseUrl(base_url),
     _apiActivatePath(activate_path),
     _apiAuthPath(auth_path),
     _apiRefreshTokenPath(refresh_path),
-    _dataCollectionTimeMinutes(DEFAULT_DATA_COLLECTION_MINUTES), // Initialize with default
-    _activatedFlag(false), // Default to not activated
-    _deviceMACAddress("") // Initialize MAC address to empty
-    { 
-    _preferences.begin(NVS_NAMESPACE, false); // false for read/write mode
+    _dataCollectionTimeMinutes(0),
+    _activatedFlag(false),
+    _deviceMACAddress(""),
+    _aesKeyInitialized(false) {
+    if (!_initAesKey()) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[API CRITICAL] AES Key initialization FAILED. API state will not be encrypted/decrypted."));
+        #endif
+    }
     _loadPersistentData();
 }
 
-/**
- * @brief Destructor implementation.
- */
 API::~API() {
-    _preferences.end();
 }
 
-/**
- * @brief Sets the device's MAC address.
- * This MAC address will be used during the activation process.
- * @param mac The MAC address of the device as a String.
- */
 void API::setDeviceMAC(const String& mac) {
     _deviceMACAddress = mac;
     #ifdef ENABLE_DEBUG_SERIAL
@@ -42,136 +57,259 @@ void API::setDeviceMAC(const String& mac) {
     #endif
 }
 
-/**
- * @brief Closes the Preferences (NVS) namespace.
- * Should be called before entering deep sleep to ensure data is committed.
- */
-void API::closePreferences() { 
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("[API] Closing NVS preferences.");
-    #endif
-    _preferences.end();
-}
-
-/**
- * @brief Loads all persistent data items from NVS into member variables.
- * Also checks for an NVS validity flag. If the flag is not present or false,
- * it assumes NVS might be new or corrupted and resets activation-related data.
- */
-void API::_loadPersistentData() {
-    bool nvsIsValid = _preferences.getBool(KEY_NVS_VALID_FLAG, false);
-
-    if (!nvsIsValid) {
+bool API::_saveCurrentApiStateToSd() {
+    if (!_sdManagerRef.isSDAvailable()) {
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("[API_Load] NVS validity flag not found or false. Assuming NVS is new or corrupted.");
-            Serial.println("[API_Load] Resetting activation status and tokens.");
+            Serial.println("[API_Save] SD card not available. Cannot save API state.");
         #endif
-        // NVS is considered invalid or new, reset critical activation data
-        _accessToken = "";
-        _refreshToken = "";
-        _dataCollectionTimeMinutes = DEFAULT_DATA_COLLECTION_MINUTES;
-        _activatedFlag = false;
-        // Save this "clean slate" state to NVS immediately, including the valid flag
-        _saveAccessToken(_accessToken);
-        _saveRefreshToken(_refreshToken);
-        _saveDataCollectionTime(_dataCollectionTimeMinutes);
-        _saveActivationStatus(_activatedFlag); // This will also set the nvs_valid_flag to true
+        return false;
+    }
+
+    JsonDocument doc;
+    doc[JSON_KEY_ACCESS_TOKEN] = _accessToken;
+    doc[JSON_KEY_REFRESH_TOKEN] = _refreshToken;
+    doc[JSON_KEY_COLLECTION_TIME] = _dataCollectionTimeMinutes;
+    doc[JSON_KEY_IS_ACTIVATED] = _activatedFlag;
+
+    String stateJsonToSavePlain;
+    serializeJson(doc, stateJsonToSavePlain);
+
+    if (stateJsonToSavePlain.isEmpty()) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("[API_Save] Failed to serialize API state to JSON for encryption.");
+        #endif
+        return false;
+    }
+
+    String dataToStoreOnSd; 
+
+    if (_aesKeyInitialized) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("[API_Save] Encrypting API state...");
+        #endif
+        
+        mbedtls_gcm_context gcm;
+        unsigned char iv[AES_GCM_IV_LENGTH];
+        unsigned char tag[AES_GCM_TAG_LENGTH];
+        
+        size_t plaintextLength = stateJsonToSavePlain.length();
+        unsigned char* ciphertextBuffer = (unsigned char*)malloc(plaintextLength);
+        if (!ciphertextBuffer) {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println("[API_Save] Failed to allocate memory for ciphertext buffer!");
+            #endif
+            return false;
+        }
+
+        esp_fill_random(iv, AES_GCM_IV_LENGTH);
+
+        mbedtls_gcm_init(&gcm);
+        int ret = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, _aesKey, API_AES_KEY_SIZE * 8);
+        if (ret != 0) {
+            mbedtls_gcm_free(&gcm); free(ciphertextBuffer); return false;
+        }
+
+        ret = mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, plaintextLength, 
+                                        iv, AES_GCM_IV_LENGTH, NULL, 0, 
+                                        (const unsigned char*)stateJsonToSavePlain.c_str(), ciphertextBuffer,
+                                        AES_GCM_TAG_LENGTH, tag);
+        mbedtls_gcm_free(&gcm);
+        if (ret != 0) {
+            free(ciphertextBuffer); return false;
+        }
+
+        // --- LÓGICA DE COMBINACIÓN CORREGIDA Y MÁS SEGURA ---
+        size_t totalEncryptedLength = AES_GCM_IV_LENGTH + AES_GCM_TAG_LENGTH + plaintextLength;
+        std::vector<unsigned char> combinedBuffer(totalEncryptedLength);
+        memcpy(combinedBuffer.data(), iv, AES_GCM_IV_LENGTH);
+        memcpy(combinedBuffer.data() + AES_GCM_IV_LENGTH, tag, AES_GCM_TAG_LENGTH);
+        memcpy(combinedBuffer.data() + AES_GCM_IV_LENGTH + AES_GCM_TAG_LENGTH, ciphertextBuffer, plaintextLength);
+        
+        free(ciphertextBuffer);
+
+        // --- LÓGICA DE BASE64 CORREGIDA ---
+        size_t base64Len;
+        mbedtls_base64_encode(NULL, 0, &base64Len, combinedBuffer.data(), combinedBuffer.size());
+        std::vector<unsigned char> base64Buffer(base64Len);
+        
+        ret = mbedtls_base64_encode(base64Buffer.data(), base64Len, &base64Len, combinedBuffer.data(), combinedBuffer.size());
+        if(ret != 0){ return false; }
+
+        dataToStoreOnSd = String((char*)base64Buffer.data());
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("[API_Save] API state encrypted and Base64 encoded successfully.");
+        #endif
+
     } else {
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("[API_Load] NVS validity flag is true. Loading data normally.");
+            Serial.println("[API_Save] AES key not initialized. Saving API state as PLAINTEXT.");
         #endif
-        _accessToken = _preferences.getString(KEY_ACCESS_TOKEN, "");
-        _refreshToken = _preferences.getString(KEY_REFRESH_TOKEN, "");
-        _dataCollectionTimeMinutes = _preferences.getInt(KEY_DATA_COLLECTION_TIME, DEFAULT_DATA_COLLECTION_MINUTES);
-        _activatedFlag = _preferences.getBool(KEY_IS_ACTIVATED, false);
+        dataToStoreOnSd = stateJsonToSavePlain;
     }
 
-    // Ensure _dataCollectionTimeMinutes has a sane default if NVS was empty or had 0,
-    // even if nvsIsValid was true but data was somehow bad.
-    if (_dataCollectionTimeMinutes <= 0) {
-        _dataCollectionTimeMinutes = DEFAULT_DATA_COLLECTION_MINUTES;
+    bool success = _sdManagerRef.saveApiState(dataToStoreOnSd);
+    return success;
+}
+
+
+void API::_loadPersistentData() {
+    String stateJsonFromSdBase64; 
+    if (_sdManagerRef.isSDAvailable() && _sdManagerRef.readApiState(stateJsonFromSdBase64) && !stateJsonFromSdBase64.isEmpty()) {
+        
+        String stateJsonPlain = ""; 
+
+        if (_aesKeyInitialized && stateJsonFromSdBase64.length() > 50) { 
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println("[API_Load] Data found on SD. Attempting decryption...");
+            #endif
+            
+            size_t decodedLen;
+            mbedtls_base64_decode(NULL, 0, &decodedLen, (const unsigned char*)stateJsonFromSdBase64.c_str(), stateJsonFromSdBase64.length());
+            std::vector<unsigned char> encryptedBuffer(decodedLen);
+            
+            int ret = mbedtls_base64_decode(encryptedBuffer.data(), encryptedBuffer.size(), &decodedLen, (const unsigned char*)stateJsonFromSdBase64.c_str(), stateJsonFromSdBase64.length());
+
+            if (ret != 0 || decodedLen < (AES_GCM_IV_LENGTH + AES_GCM_TAG_LENGTH)) {
+                #ifdef ENABLE_DEBUG_SERIAL
+                    Serial.printf("[API_Load] Base64 decode failed (-0x%04X) or decoded data too short. Treating as corrupt.\n", -ret);
+                #endif
+                goto use_defaults;
+            }
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[API_Load] Base64 decoded successfully. Total binary length: %d bytes.\n", decodedLen);
+            #endif
+
+            // --- LÓGICA DE EXTRACCIÓN CORREGIDA ---
+            unsigned char iv[AES_GCM_IV_LENGTH];
+            unsigned char tag[AES_GCM_TAG_LENGTH];
+            size_t ciphertextLength = decodedLen - AES_GCM_IV_LENGTH - AES_GCM_TAG_LENGTH;
+            
+            memcpy(iv, encryptedBuffer.data(), AES_GCM_IV_LENGTH);
+            memcpy(tag, encryptedBuffer.data() + AES_GCM_IV_LENGTH, AES_GCM_TAG_LENGTH);
+            
+            std::vector<unsigned char> plaintextBuffer(ciphertextLength);
+
+            mbedtls_gcm_context gcm;
+            mbedtls_gcm_init(&gcm);
+            ret = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, _aesKey, API_AES_KEY_SIZE * 8);
+            if (ret != 0) { mbedtls_gcm_free(&gcm); goto use_defaults; }
+
+            ret = mbedtls_gcm_auth_decrypt(&gcm, ciphertextLength,
+                                           iv, AES_GCM_IV_LENGTH, NULL, 0,
+                                           tag, AES_GCM_TAG_LENGTH,
+                                           encryptedBuffer.data() + AES_GCM_IV_LENGTH + AES_GCM_TAG_LENGTH, /* Puntero al ciphertext */
+                                           plaintextBuffer.data());
+            mbedtls_gcm_free(&gcm);
+
+            if (ret == 0) {
+                stateJsonPlain = String((char*)plaintextBuffer.data(), plaintextBuffer.size()); // Crear String con longitud explícita
+                #ifdef ENABLE_DEBUG_SERIAL
+                    Serial.println("[API_Load] API state decrypted successfully!");
+                #endif
+            } else {
+                #ifdef ENABLE_DEBUG_SERIAL
+                    Serial.printf("[API_Load] Decryption FAILED (mbedtls_gcm_auth_decrypt: -0x%04X). Data is corrupt or key is wrong.\n", -ret);
+                #endif
+                goto use_defaults;
+            }
+
+        } else {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println("[API_Load] Loading API state as PLAINTEXT (key not ready or data seems unencrypted).");
+            #endif
+            stateJsonPlain = stateJsonFromSdBase64;
+        }
+
+        // --- Lógica de parseo (sin cambios) ---
+        if (!stateJsonPlain.isEmpty()) {
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, stateJsonPlain);
+            if (error) {
+                #ifdef ENABLE_DEBUG_SERIAL
+                    Serial.printf("[API_Load] Failed to parse API state JSON: %s. Using defaults.\n", error.c_str());
+                #endif
+                goto use_defaults;
+            } else {
+                _accessToken = doc[JSON_KEY_ACCESS_TOKEN] | "";
+                _refreshToken = doc[JSON_KEY_REFRESH_TOKEN] | "";
+                _dataCollectionTimeMinutes = doc[JSON_KEY_COLLECTION_TIME] | 0;
+                _activatedFlag = doc[JSON_KEY_IS_ACTIVATED] | false;
+                #ifdef ENABLE_DEBUG_SERIAL
+                    Serial.println("[API_Load] API state parsed successfully.");
+                #endif
+            }
+        } else {
+             goto use_defaults;
+        }
+
+    } else { 
+use_defaults:
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("[API_Load] No valid API state found. Using defaults and saving a new state file.");
+        #endif
+        _accessToken = "";
+        _refreshToken = "";
+        _dataCollectionTimeMinutes = 0;
+        _activatedFlag = false;
+        if (_sdManagerRef.isSDAvailable()) {
+             _saveCurrentApiStateToSd();
+        }
     }
 
+    if (_dataCollectionTimeMinutes <= 0) { _dataCollectionTimeMinutes = 0; }
+    
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("[API] Persistent data loaded/validated from NVS.");
-        Serial.printf("[API]  - NVS Valid Flag was: %s\n", nvsIsValid ? "True" : "False (or missing)");
-        Serial.printf("[API]  - AccessToken: %s\n", _accessToken.isEmpty() ? "Empty" : (_accessToken.substring(0,5) + "...").c_str());
-        Serial.printf("[API]  - RefreshToken: %s\n", _refreshToken.isEmpty() ? "Empty" : (_refreshToken.substring(0,5) + "...").c_str());
-        Serial.printf("[API]  - DataCollectionTime: %d min\n", _dataCollectionTimeMinutes);
-        Serial.printf("[API]  - Activated: %s\n", _activatedFlag ? "Yes" : "No");
+        Serial.printf("[API_Load] Effective State after load: Activated: %s\n", _activatedFlag ? "Yes" : "No");
     #endif
 }
 
 
-// --- NVS Save Methods ---
-void API::_saveAccessToken(const String& token) {
+void API::_updateAccessToken(const String& token) {
     _accessToken = token;
-    _preferences.putString(KEY_ACCESS_TOKEN, _accessToken);
+    _saveCurrentApiStateToSd();
 }
 
-void API::_saveRefreshToken(const String& token) {
+void API::_updateRefreshToken(const String& token) {
     _refreshToken = token;
-    _preferences.putString(KEY_REFRESH_TOKEN, _refreshToken);
+    _saveCurrentApiStateToSd();
 }
 
-void API::_saveDataCollectionTime(int minutes) {
-    if (minutes <= 0) minutes = DEFAULT_DATA_COLLECTION_MINUTES; // Ensure sane value
+void API::_updateDataCollectionTime(int minutes) {
+    if (minutes <= 0) minutes = 0;
     _dataCollectionTimeMinutes = minutes;
-    _preferences.putInt(KEY_DATA_COLLECTION_TIME, _dataCollectionTimeMinutes);
+    _saveCurrentApiStateToSd();
 }
 
-/**
- * @brief Saves the activation status to NVS and updates the member variable.
- * Also saves an NVS validity flag to indicate that NVS has been written to correctly.
- * @param activated The activation status (true or false).
- */
-void API::_saveActivationStatus(bool activated) {
+void API::_updateActivationStatus(bool activated) {
     _activatedFlag = activated;
-    _preferences.putBool(KEY_IS_ACTIVATED, _activatedFlag);
-    _preferences.putBool(KEY_NVS_VALID_FLAG, true); // Mark NVS as valid after a state save
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.printf("[API_Save] Activation status saved: %s. NVS valid flag set to true.\n", _activatedFlag ? "Activated" : "Not Activated");
-    #endif
+    _saveCurrentApiStateToSd();
 }
 
-// --- Public Getter Methods ---
-bool API::isActivated() const {
-    return _activatedFlag;
-}
-
-String API::getAccessToken() const {
-    return _accessToken;
-}
-
-String API::getBaseApiUrl() const {
-    return _apiBaseUrl;
-}
-
+// --- Public Getter Methods (no change) ---
+bool API::isActivated() const { return _activatedFlag; }
+String API::getAccessToken() const { return _accessToken; }
+String API::getBaseApiUrl() const { return _apiBaseUrl; }
 int API::getDataCollectionTimeMinutes() const {
-    return _dataCollectionTimeMinutes > 0 ? _dataCollectionTimeMinutes : DEFAULT_DATA_COLLECTION_MINUTES;
+    return _dataCollectionTimeMinutes > 0 ? _dataCollectionTimeMinutes : 0;
 }
 
 // --- Core API Interaction Methods ---
-
-/**
- * @brief Performs an HTTP POST request.
- */
 int API::_httpPost(const String& fullUrl, const String& authorizationToken, const String& jsonPayload, String& responsePayload) {
     HTTPClient http;
-    int httpResponseCode = -1; // Default to client error
+    int httpResponseCode = -1; 
 
     if (WiFi.status() != WL_CONNECTED) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println("[API_httpPost] No WiFi connection.");
         #endif
-        return -100; // Custom error code for no WiFi
+        return -100; 
     }
     
-    http.setReuse(false);
+    http.setReuse(false); // Good practice for ESP32 HTTPClient
     if (http.begin(fullUrl)) {
         http.setTimeout(HTTP_REQUEST_TIMEOUT);
         http.addHeader("Content-Type", "application/json");
-        http.addHeader("Connection", "close");
+        http.addHeader("Connection", "close"); // Advised for ESP32 to ensure resources are freed
         if (!authorizationToken.isEmpty()) {
             http.addHeader("Authorization", "Device " + authorizationToken);
         }
@@ -179,15 +317,13 @@ int API::_httpPost(const String& fullUrl, const String& authorizationToken, cons
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.printf("[API_httpPost] POST to: %s\n", fullUrl.c_str());
             if(!jsonPayload.isEmpty()) Serial.printf("[API_httpPost] Payload: %s\n", jsonPayload.c_str());
-            if(!authorizationToken.isEmpty()) Serial.printf("[API_httpPost] Auth: Device %s\n", authorizationToken.substring(0,10).c_str()); // Log first 10 chars of token
         #endif
 
-        if(jsonPayload.isEmpty()){ // For requests like /auth that might not have a body but are POST
+        if(jsonPayload.isEmpty()){
              httpResponseCode = http.POST("");
         } else {
              httpResponseCode = http.POST(jsonPayload);
         }
-
 
         if (httpResponseCode > 0) {
             responsePayload = http.getString();
@@ -205,216 +341,247 @@ int API::_httpPost(const String& fullUrl, const String& authorizationToken, cons
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.printf("[API_httpPost] Unable to begin connection to %s\n", fullUrl.c_str());
         #endif
-        httpResponseCode = -101; // Custom error code for connection begin failed
+        httpResponseCode = -101; 
     }
     return httpResponseCode;
 }
 
-/**
- * @brief Parses DeviceActivationResponseDto or DeviceAuthResponseDto.
- */
 bool API::_parseAndStoreAuthResponse(const String& jsonResponse) {
-    if (jsonResponse.isEmpty()) {
-        return false;
-    }
+    if (jsonResponse.isEmpty()) return false;
 
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, jsonResponse);
 
     if (error) {
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.print(F("[API_parse] JSON deserialization failed: "));
+            Serial.print(F("[API_parse] JSON deserialization failed for auth response: "));
             Serial.println(error.f_str());
         #endif
         return false;
     }
 
-    // Extract fields - assuming DTOs have these exact names
-    // {"accessToken":"...", "refreshToken":"...", "dataCollectionTimeMinutes":...}
-    const char* newAccessToken = doc["accessToken"];
-    const char* newRefreshToken = doc["refreshToken"];
-    int newDataCollectionTime = doc["dataCollectionTime"] | 0; // Default to 0 if not present or invalid
+    const char* newAccessToken = doc[JSON_KEY_ACCESS_TOKEN];
+    const char* newRefreshToken = doc[JSON_KEY_REFRESH_TOKEN];
+    int newDataCollectionTime = doc[JSON_KEY_COLLECTION_TIME] | 0; 
 
-    bool success = false;
-    if (newAccessToken && newRefreshToken) { // Both tokens must be present
-        if (String(newAccessToken) != _accessToken) {
-            _saveAccessToken(String(newAccessToken));
-            #ifdef ENABLE_DEBUG_SERIAL
-                Serial.println(F("[API_parse] AccessToken updated."));
-            #endif
-        }
-        if (String(newRefreshToken) != _refreshToken) {
-            _saveRefreshToken(String(newRefreshToken));
-            #ifdef ENABLE_DEBUG_SERIAL
-                Serial.println(F("[API_parse] RefreshToken updated."));
-            #endif
-        }
-        success = true; // Tokens processed
+    bool tokensProcessed = false;
+    if (newAccessToken && newRefreshToken) {
+        _updateAccessToken(String(newAccessToken)); 
+        _updateRefreshToken(String(newRefreshToken)); 
+        tokensProcessed = true;
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[API_parse] AccessToken and RefreshToken updated from response."));
+        #endif
     } else {
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[API_parse] accessToken or refreshToken missing in JSON response."));
+            Serial.println(F("[API_parse] accessToken or refreshToken missing in auth JSON response."));
         #endif
-        return false; // Essential tokens missing
+        // If essential tokens are missing, this is problematic.
+        // Depending on API design, this might mean deactivation or error.
+        // For now, we just note they are missing and don't update them.
+        // If activation returned 200 but tokens are missing, activation logic should handle that.
     }
     
-    if (newDataCollectionTime > 0 && newDataCollectionTime != _dataCollectionTimeMinutes) {
-        _saveDataCollectionTime(newDataCollectionTime);
+    // Only update collection time if a valid positive value is received
+    if (newDataCollectionTime > 0) {
+        _updateDataCollectionTime(newDataCollectionTime); // Will save combined state to SD
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[API_parse] DataCollectionTimeMinutes updated to: %d\n", newDataCollectionTime);
+            Serial.printf("[API_parse] DataCollectionTimeMinutes updated to: %d via _update method.\n", _dataCollectionTimeMinutes);
         #endif
-    } else if (doc.containsKey("dataCollectionTimeMinutes") && newDataCollectionTime <= 0) {
-        // If the key exists but the value is invalid (e.g. 0 or negative), it might be an issue.
-        // For now, we keep the existing or default. Could log a warning.
+    } else if (!doc[JSON_KEY_COLLECTION_TIME].isNull() && newDataCollectionTime <= 0) {
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[API_parse] Received invalid dataCollectionTimeMinutes: %d. Keeping current: %d\n", newDataCollectionTime, _dataCollectionTimeMinutes);
+            Serial.printf("[API_parse] Received invalid dataCollectionTimeMinutes: %d. Kept current: %d\n", newDataCollectionTime, _dataCollectionTimeMinutes);
         #endif
     }
+    // If dataCollectionTimeMinutes is not in the response, _dataCollectionTimeMinutes member remains unchanged.
 
-
-    return success;
+    return tokensProcessed; // Return true if at least tokens were successfully parsed and updated
 }
 
-/**
- * @brief Attempts device activation.
- */
 int API::performActivation(const String& deviceId, const String& activationCode) {
-    if (deviceId.isEmpty() || activationCode.isEmpty()) {
-        return -102; // Custom error for missing params
-    }
+    if (deviceId.isEmpty() || activationCode.isEmpty()) return -102;
 
     JsonDocument doc;
-    doc["deviceId"] = deviceId.toInt(); // As per user story, DeviceId is int
+    doc["deviceId"] = deviceId.toInt();
     doc["activationCode"] = activationCode;
     if (!_deviceMACAddress.isEmpty()) { 
         doc["macAddress"] = _deviceMACAddress;
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[API_Activate] Including MAC Address in activation payload: %s\n", _deviceMACAddress.c_str());
-        #endif
-    } else {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("[API_Activate] MAC Address is empty, not including in activation payload.");
-        #endif
     }
-
 
     String payload;
     serializeJson(doc, payload);
     String responsePayload;
     String fullUrl = _apiBaseUrl + _apiActivatePath;
 
-    int httpCode = _httpPost(fullUrl, "", payload, responsePayload); // No auth token for activation
+    int httpCode = _httpPost(fullUrl, "", payload, responsePayload);
 
     if (httpCode == 200) {
         if (_parseAndStoreAuthResponse(responsePayload)) {
-            _saveActivationStatus(true);
+            _updateActivationStatus(true); // This will also save all current state to SD
         } else {
-            // Successful HTTP but failed to parse or missing tokens in response
-            httpCode = -103; // Custom error for parse failure
-            _saveActivationStatus(false); // Ensure not marked as active
+            httpCode = -103; // Parse failure or missing tokens
+            _updateActivationStatus(false);
         }
     } else {
-        _saveActivationStatus(false); // Activation failed, ensure not marked as active
+        _updateActivationStatus(false);
     }
     return httpCode;
 }
 
-/**
- * @brief Checks backend and authentication.
- */
 int API::checkBackendAndAuth() {
     if (!_activatedFlag) {
-         #ifdef ENABLE_DEBUG_SERIAL
+        #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[API_AuthCheck] Device not activated. Skipping auth check."));
         #endif
-        return -104; // Custom error for not activated
+        return -104; 
     }
     if (_accessToken.isEmpty()) {
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[API_AuthCheck] No access token available. Attempting refresh first."));
+            Serial.println(F("[API_AuthCheck] No access token. Attempting refresh first."));
         #endif
-        // If no access token, try to refresh first (e.g. after a restart with valid refresh token)
         int refreshHttpCode = performTokenRefresh();
         if(refreshHttpCode != 200) {
-             // Refresh failed, cannot proceed with auth check using an access token
-            return refreshHttpCode; // Return the error code from refresh attempt
+            // If refresh fails, and we didn't have an access token, we can't proceed.
+            // performTokenRefresh itself handles deactivation on critical refresh failure.
+            return refreshHttpCode;
         }
-        // If refresh was successful, _accessToken is now populated. Proceed.
+        // If refresh succeeded, _accessToken is now populated.
     }
 
     String responsePayload;
     String fullUrl = _apiBaseUrl + _apiAuthPath;
 
-    // Create the JSON payload for the /auth request
     JsonDocument docAuthRequest;
-    docAuthRequest["token"] = _accessToken; // Use the current access token
+    docAuthRequest["token"] = _accessToken; 
     String authRequestPayload;
     serializeJson(docAuthRequest, authRequestPayload);
-
-    if (authRequestPayload.isEmpty() && !_accessToken.isEmpty()) { // Check if serialization failed but token was present
+    
+    // If serialization failed for some reason but token was present
+    if (authRequestPayload.isEmpty() && !_accessToken.isEmpty()) { 
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[API_AuthCheck] Failed to serialize auth request payload for /auth endpoint."));
         #endif
-        // Return a custom error code indicating payload serialization failure for a non-empty token
-        // to distinguish from an empty token case if that were handled differently.
         return -106; 
     }
-    
-    // If _accessToken was empty and performTokenRefresh populated it, 
-    // authRequestPayload would have been built with the new token.
-    // If _accessToken was initially present, authRequestPayload uses that.
-    // The _httpPost method requires an accessToken for its header, which should be the same one used in the payload.
+
     int httpCode = _httpPost(fullUrl, _accessToken, authRequestPayload, responsePayload);
 
     if (httpCode == 200) {
-        _parseAndStoreAuthResponse(responsePayload); // Update tokens/collection time if different
-    } else if (httpCode == 401) { // Unauthorized, token likely expired or invalid
+        // Parse and store any updated tokens/collection time.
+        // The _activatedFlag itself shouldn't change on a successful /auth call.
+        _parseAndStoreAuthResponse(responsePayload); 
+    } else if (httpCode == 401) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[API_AuthCheck] Auth endpoint returned 401. Attempting token refresh."));
         #endif
-        httpCode = performTokenRefresh(); // This will handle deactivation on critical refresh failure
+        httpCode = performTokenRefresh(); // This will update state on SD if successful and handle deactivation on critical refresh failure
     }
-    // Other HTTP codes (e.g., 500, 400, network errors) are returned as is.
     return httpCode;
 }
 
-/**
- * @brief Attempts token refresh.
- */
 int API::performTokenRefresh() {
     if (_refreshToken.isEmpty()) {
          #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[API_Refresh] No refresh token available. Cannot refresh."));
+            Serial.println(F("[API_Refresh] No refresh token available. Cannot refresh. Deactivating."));
         #endif
-        _saveActivationStatus(false); // Cannot refresh, so consider deactivated
-        return -105; // Custom error for no refresh token
+        _updateAccessToken(""); // Clear potentially invalid access token
+        _updateActivationStatus(false); // Deactivate and save state to SD
+        return -105; 
     }
 
     JsonDocument doc;
-    doc["token"] = _refreshToken; // As per user story: {"token": stored_refresh_token}
+    doc["token"] = _refreshToken;
 
     String payload;
     serializeJson(doc, payload);
     String responsePayload;
     String fullUrl = _apiBaseUrl + _apiRefreshTokenPath;
 
-    // Assuming refresh token endpoint does not need the (potentially expired) access token for Auth header
-    int httpCode = _httpPost(fullUrl, "", payload, responsePayload);
+    int httpCode = _httpPost(fullUrl, "", payload, responsePayload); // Refresh usually doesn't need prior auth with access token
 
     if (httpCode == 200) {
         if (!_parseAndStoreAuthResponse(responsePayload)) {
-            // Successful HTTP but failed to parse or missing tokens in response
+            // Successful HTTP but failed to parse or missing new tokens in response
             httpCode = -103; // Custom error for parse failure
-            // Do not necessarily deactivate here, as old tokens might still be somewhat valid
-            // until explicitly invalidated by a 401 on refresh itself.
+            // Don't deactivate here yet, let next checkBackendAndAuth or operation fail if tokens are truly bad.
+            // Or, if API guarantees new tokens on 200, this implies a server/contract issue.
         }
+        // Activation status should remain true if refresh is successful.
+        // _parseAndStoreAuthResponse would update tokens, which then get saved via _saveCurrentApiStateToSd
     } else if (httpCode == 401) { // Refresh token itself is invalid/expired
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[API_Refresh] Refresh token rejected (401). Deactivating device."));
         #endif
-        _saveAccessToken("");    // Clear tokens
-        _saveRefreshToken("");
-        _saveActivationStatus(false); // Deactivate
+        _updateAccessToken("");    // Clear tokens
+        _updateRefreshToken("");
+        _updateActivationStatus(false); // Deactivate and save this state to SD
     }
-    // Other HTTP codes are returned as is.
     return httpCode;
+}
+
+bool API::_initAesKey() {
+    nvs_handle_t nvsHandle;
+    esp_err_t err;
+
+    // Open NVS
+    err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvsHandle);
+    if (err != ESP_OK) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[API_Key] Error (%s) opening NVS handle!\n", esp_err_to_name(err));
+        #endif
+        return false;
+    }
+
+    // Try to read the key
+    size_t required_size = API_AES_KEY_SIZE;
+    err = nvs_get_blob(nvsHandle, NVS_AES_KEY_NAME, _aesKey, &required_size);
+
+    if (err == ESP_OK && required_size == API_AES_KEY_SIZE) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[API_Key] AES key loaded successfully from NVS."));
+        #endif
+        nvs_close(nvsHandle);
+        _aesKeyInitialized = true;
+        return true;
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[API_Key] AES key not found in NVS. Generating a new one..."));
+        #endif
+        
+        // Generate a new random key
+        esp_fill_random(_aesKey, API_AES_KEY_SIZE);
+
+        // Save the new key to NVS
+        err = nvs_set_blob(nvsHandle, NVS_AES_KEY_NAME, _aesKey, API_AES_KEY_SIZE);
+        if (err != ESP_OK) {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[API_Key] Error (%s) saving new AES key to NVS!\n", esp_err_to_name(err));
+            #endif
+            nvs_close(nvsHandle);
+            return false;
+        }
+
+        // Commit changes
+        err = nvs_commit(nvsHandle);
+        if (err != ESP_OK) {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.printf("[API_Key] Error (%s) committing new AES key to NVS!\n", esp_err_to_name(err));
+            #endif
+            nvs_close(nvsHandle);
+            return false;
+        }
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[API_Key] New AES key generated and saved to NVS."));
+        #endif
+        nvs_close(nvsHandle);
+        _aesKeyInitialized = true;
+        return true;
+
+    } else { // Other error reading BLOB
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[API_Key] Error (%s) reading AES key from NVS. Size: %d\n", esp_err_to_name(err), required_size);
+        #endif
+        nvs_close(nvsHandle);
+        return false;
+    }
 }
