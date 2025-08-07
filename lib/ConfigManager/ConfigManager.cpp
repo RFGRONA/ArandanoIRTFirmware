@@ -94,14 +94,12 @@ bool loadConfiguration(const char *filename) {
     config.apiAmbientDataPath = doc["api_ambient_data_path"] | config.apiAmbientDataPath;
     config.apiCaptureDataPath = doc["api_capture_data_path"] | config.apiCaptureDataPath;
 
-    config.sleep_sec = doc["sleep_sec"] | config.sleep_sec;
+    config.data_interval_minutes = doc["data_interval_minutes"] | config.data_interval_minutes;
 
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println("[ConfigMgr] Configuration loaded successfully from file:");
         Serial.println("  WiFi SSID: " + config.wifi_ssid);
-        // Serial.println("  WiFi Pass: [REDACTED]"); // Keep password redacted
         Serial.println("  Device ID: " + String(config.deviceId));
-        // Serial.println("  Activation Code: [REDACTED]");
         Serial.println("  API Base URL: " + config.apiBaseUrl);
         Serial.println("  API Activate Path: " + config.apiActivatePath);
         Serial.println("  API Auth Path: " + config.apiAuthPath);
@@ -109,7 +107,7 @@ bool loadConfiguration(const char *filename) {
         Serial.println("  API Log Path: " + config.apiLogPath);
         Serial.println("  API Ambient Data Path: " + config.apiAmbientDataPath);
         Serial.println("  API Capture Data Path: " + config.apiCaptureDataPath);
-        Serial.println("  Sleep Seconds: " + String(config.sleep_sec));
+        Serial.println("  Data Interval (min): " + String(config.data_interval_minutes));
     #endif
     return true;
 }

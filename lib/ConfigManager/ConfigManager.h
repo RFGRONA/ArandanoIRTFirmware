@@ -19,7 +19,7 @@ struct Config {
     String apiLogPath = "/api/device-api/log";
     String apiAmbientDataPath = "/api/device-api/ambient-data";
     String apiCaptureDataPath = "/api/device-api/capture-data";
-    int sleep_sec = 60;
+    int data_interval_minutes = 30;
 };
 
 extern Config config; // Declare 'config' as an external global variable
