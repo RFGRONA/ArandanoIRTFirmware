@@ -11,6 +11,7 @@
 
 #define NTP_SETUP_MAX_RETRIES 5
 #define NTP_SETUP_RETRY_DELAY_MS 2000
+#define SYSTEM_HALT_DELAY_MS 3600000UL // 1 hour 
 
 
 /**
@@ -56,15 +57,18 @@ void initI2C_Sys(int sdaPin, int sclPin, uint32_t frequency) {
  * @param visCamera The OV2640 visual camera object.
  * @return `true` if all sensors were initialized successfully. `false` if any sensor failed.
  */
-bool initializeSensors_Sys(DHT22Sensor& dht, BH1750Sensor& light, MLX90640Sensor& thermal, OV2640Sensor& visCamera) {
-    // --- Initialize DHT22 Sensor ---
+bool initializeSensors_Sys(BME280Sensor& bme, BH1750Sensor& light, MLX90640Sensor& thermal, OV2640Sensor& visCamera) {
+    // --- Initialize BME280 Sensor (Temp/Humidity/Pressure) ---
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("[SysInit] Initializing DHT22 sensor...");
+        Serial.println("[SysInit] Initializing BME280 sensor...");
     #endif
-    dht.begin(); // DHT library begin() usually doesn't return a status.
+    if (!bme.begin()) { // La inicialización del BME280 devuelve un estado.
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("[SysInit] !!! BME280 Sensor Initialization FAILED !!!");
+        #endif
+        return false;
+    }
     delay(100);
-
-    // --- I2C Bus should be initialized by initI2C_Sys before calling this function ---
 
     // --- Initialize BH1750 Light Sensor (via I2C) ---
     #ifdef ENABLE_DEBUG_SERIAL
@@ -241,7 +245,7 @@ bool initializeNTP_Sys(TimeManager& timeMgr, SDManager& sdMgr, API* api_comm, Co
             Serial.println(F("[SysInit_NTP] FATAL: WiFi not connected. Cannot sync NTP. Halting."));
          #endif
          // This should not happen if initializeWiFi_Sys is called first and succeeds.
-        delay(3600000UL); // 1 hour
+        delay(SYSTEM_HALT_DELAY_MS); 
         ESP.restart();
     }
 
@@ -287,7 +291,7 @@ bool initializeNTP_Sys(TimeManager& timeMgr, SDManager& sdMgr, API* api_comm, Co
         Serial.println(F("--- SYSTEM HALTED ---"));
         Serial.flush();
     #endif
-    delay(3600000UL); // 1 hour
+    delay(SYSTEM_HALT_DELAY_MS); 
     ESP.restart();
     
     return false; // Should not be reached

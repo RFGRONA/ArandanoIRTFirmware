@@ -3,11 +3,10 @@
 #define SYSTEM_INIT_H
 
 #include <Arduino.h>
-// Include headers for types used in parameters for initializeSensors_Sys
-#include "DHT22Sensor.h"    
+#include "BME280Sensor.h" 
+#include "OV2640Sensor.h"
 #include "BH1750Sensor.h"   
 #include "MLX90640Sensor.h" 
-#include "OV2640Sensor.h"
 #include "WiFiManager.h"    
 #include "LEDStatus.h"      
 #include "ConfigManager.h"  
@@ -29,13 +28,13 @@ void initI2C_Sys(int sdaPin, int sclPin, uint32_t frequency = 100000);
 
 
 /** @brief Initializes all hardware sensors sequentially.
- * @param dht The DHT22 sensor object.
+ * @param bme The BME280 Temp, Hum and Pressure sensor object.
  * @param light The BH1750 light sensor object (uses I2C initialized by initI2C_Sys).
  * @param thermal The MLX90640 thermal sensor object (uses I2C).
  * @param visCamera The OV2640 visual camera object.
  * @return True if all sensors initialized successfully.
  */
-bool initializeSensors_Sys(DHT22Sensor& dht, BH1750Sensor& light, MLX90640Sensor& thermal, OV2640Sensor& visCamera);
+bool initializeSensors_Sys(BME280Sensor& bme, BH1750Sensor& light, MLX90640Sensor& thermal, OV2640Sensor& visCamera);
 
 /** @brief Handles actions to take if sensor initialization fails.
  * This function will not return as it now halts the device.
