@@ -14,9 +14,11 @@
 int EnvironmentDataJSON::IOEnvironmentData(
     const String& fullEnvDataUrl,
     const String& accessToken,
+    const String& timestamp,
     float lightLevel,
     float temperature,
-    float humidity
+    float humidity,
+    float pressure
 ) {
     // Basic validation of inputs
     if (fullEnvDataUrl.isEmpty()) {
@@ -35,9 +37,11 @@ int EnvironmentDataJSON::IOEnvironmentData(
 
     // Create a JSON document.
     JsonDocument doc;
+    doc["timestamp"] = timestamp;
     doc["light"] = lightLevel;
     doc["temperature"] = temperature;
     doc["humidity"] = humidity;
+    doc["pressure"] = pressure;
 
     String jsonPayload;
     serializeJson(doc, jsonPayload);
@@ -75,13 +79,13 @@ int EnvironmentDataJSON::IOEnvironmentData(
         #ifdef ENABLE_DEBUG_SERIAL
             if (httpResponseCode > 0) {
                 Serial.printf("[EnvDataJSON] HTTP Response Code: %d\n", httpResponseCode);
-                String responseBody = http.getString(); // API for env data returns 204 No Content typically
+                String responseBody = http.getString();
                 if (!responseBody.isEmpty()) Serial.printf("[EnvDataJSON] Response: %s\n", responseBody.c_str());
             } else {
                 Serial.printf("[EnvDataJSON] HTTP POST failed, error: %s (Code: %d)\n", http.errorToString(httpResponseCode).c_str(), httpResponseCode);
             }
         #endif
-        // Ensure response body is consumed if not already read for debug
+        
         if (httpResponseCode > 0 && http.getSize() > 0) {
              http.getString();
         }

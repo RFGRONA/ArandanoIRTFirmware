@@ -2,6 +2,9 @@
 #include "TimeManager.h"
 #include <WiFi.h> // To check WiFi status before attempting NTP sync
 
+#define NTP_PER_SERVER_TIMEOUT_MS 15000 // 15 seconds per server
+#define NTP_FINAL_WAIT_MS 5000 // 5 seconds after last server timeout
+
 TimeManager::TimeManager() : 
     _timeSynchronized(false),
     _ntpServer1(DEFAULT_NTP_SERVER_1),
@@ -48,7 +51,7 @@ bool TimeManager::syncNtpTime() {
     
     struct tm timeinfo;
     int retries = 0;
-    while(!getLocalTime(&timeinfo, (NTP_SYNC_MAX_RETRIES * 15000) + 5000)) { // Max wait slightly more than all retries on default timeouts
+    while(!getLocalTime(&timeinfo, (NTP_SYNC_MAX_RETRIES * NTP_PER_SERVER_TIMEOUT_MS) + NTP_FINAL_WAIT_MS)) { // Max wait slightly more than all retries on default timeouts
                                                                           // Or manage retries manually if getLocalTime is non-blocking enough
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.print(".");
@@ -104,15 +107,15 @@ String TimeManager::getCurrentTimestampString(bool forFileNames) {
         return "TIME_STRUCT_ERROR";
     }
 
-    char buffer[30];
+    char buf[32];
     if (forFileNames) {
         // Format: YYYYMMDD_HHMMSS
-        strftime(buffer, sizeof(buffer), "%Y%m%d_%H%M%S", &timeinfo);
+        strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &timeinfo);
     } else {
         // Format: YYYY-MM-DD HH:MM:SS
-        strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
+        strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &timeinfo);
     }
-    return String(buffer);
+    return String(buf);
 }
 
 time_t TimeManager::getCurrentEpochTime() {

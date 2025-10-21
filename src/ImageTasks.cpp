@@ -17,10 +17,9 @@
  * @param cfg Reference to global Config for logging.
  * @param api_obj Reference to API object for logging.
  * @param internalTempForLog Internal device temperature for logging.
- * @param internalHumForLog Internal device humidity for logging.
  * @return True if successful.
  */
-bool captureAndCopyThermalData_Img(SDManager& sdMgr, TimeManager& timeMgr, MLX90640Sensor& thermalSensor, float** thermalDataBuffer, Config& cfg, API& api_obj, float internalTempForLog, float internalHumForLog) {
+bool captureAndCopyThermalData_Img(SDManager& sdMgr, TimeManager& timeMgr, MLX90640Sensor& thermalSensor, float** thermalDataBuffer, Config& cfg, API& api_obj, float internalTempForLog) {
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println("[ImgTasks] Reading thermal camera frame (MLX90640)...");
     #endif
@@ -59,7 +58,7 @@ bool captureAndCopyThermalData_Img(SDManager& sdMgr, TimeManager& timeMgr, MLX90
         String logUrl = api_obj.getBaseApiUrl() + cfg.apiLogPath;
         ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, api_obj.getAccessToken(), LOG_TYPE_ERROR, 
                              "Critical failure: Thermal data buffer allocation failed.", 
-                             internalTempForLog, internalHumForLog); 
+                             internalTempForLog); 
         return false;
     }
 
@@ -78,10 +77,9 @@ bool captureAndCopyThermalData_Img(SDManager& sdMgr, TimeManager& timeMgr, MLX90
  * @param cfg Reference to global Config for logging.
  * @param api_obj Reference to API object for logging.
  * @param internalTempForLog Internal device temperature for logging.
- * @param internalHumForLog Internal device humidity for logging.
  * @return True if successful.
  */
-bool captureVisualJPEG_Img(SDManager& sdMgr, TimeManager& timeMgr, OV2640Sensor& visCamera, uint8_t** jpegImageBuffer, size_t& jpegLength, Config& cfg, API& api_obj, float internalTempForLog, float internalHumForLog) { 
+bool captureVisualJPEG_Img(SDManager& sdMgr, TimeManager& timeMgr, OV2640Sensor& visCamera, uint8_t** jpegImageBuffer, size_t& jpegLength, Config& cfg, API& api_obj, float internalTempForLog) { 
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println("[ImgTasks] Capturing visual JPEG image (OV2640)...");
     #endif
@@ -97,7 +95,7 @@ bool captureVisualJPEG_Img(SDManager& sdMgr, TimeManager& timeMgr, OV2640Sensor&
         String logUrl = api_obj.getBaseApiUrl() + cfg.apiLogPath;
         ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, api_obj.getAccessToken(), LOG_TYPE_ERROR, 
                              "Critical failure: JPEG image capture or buffer allocation failed.", 
-                             internalTempForLog, internalHumForLog); 
+                             internalTempForLog); 
         return false;
     }
 
@@ -118,12 +116,11 @@ bool captureVisualJPEG_Img(SDManager& sdMgr, TimeManager& timeMgr, OV2640Sensor&
  * @param cfg Reference to global Config for logging.
  * @param api_obj Reference to API object for logging.
  * @param internalTempForLog Internal device temperature for logging.
- * @param internalHumForLog Internal device humidity for logging.
  * @return True if both captures succeed.
  */
 bool captureImages_Img(SDManager& sdMgr, TimeManager& timeMgr, OV2640Sensor& visCamera, MLX90640Sensor& thermalSensor, LEDStatus& sysLed,
                        uint8_t** jpegImage, size_t& jpegLength, float** thermalData,
-                       Config& cfg, API& api_obj, float internalTempForLog, float internalHumForLog) { 
+                       Config& cfg, API& api_obj, float internalTempForLog) { 
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println("[ImgTasks] --- Capturing Thermal and Visual Images ---");
     #endif
@@ -133,7 +130,7 @@ bool captureImages_Img(SDManager& sdMgr, TimeManager& timeMgr, OV2640Sensor& vis
 
     sysLed.setState(TAKING_DATA);
 
-    if (!captureAndCopyThermalData_Img(sdMgr, timeMgr, thermalSensor, thermalData, cfg, api_obj, internalTempForLog, internalHumForLog)) {
+    if (!captureAndCopyThermalData_Img(sdMgr, timeMgr, thermalSensor, thermalData, cfg, api_obj, internalTempForLog)) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println("[ImgTasks] Error: Failed to capture or copy thermal data.");
         #endif
@@ -142,7 +139,7 @@ bool captureImages_Img(SDManager& sdMgr, TimeManager& timeMgr, OV2640Sensor& vis
         return false;
     }
 
-    if (!captureVisualJPEG_Img(sdMgr, timeMgr, visCamera, jpegImage, jpegLength, cfg, api_obj, internalTempForLog, internalHumForLog)) {
+    if (!captureVisualJPEG_Img(sdMgr, timeMgr, visCamera, jpegImage, jpegLength, cfg, api_obj, internalTempForLog)) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println("[ImgTasks] Error: Failed to capture visual JPEG image.");
         #endif
@@ -175,17 +172,16 @@ bool captureImages_Img(SDManager& sdMgr, TimeManager& timeMgr, OV2640Sensor& vis
  * @param thermalData Thermal data buffer.
  * @param sysLed Reference to LEDStatus.
  * @param internalTempForLog Internal device temperature for logging.
- * @param internalHumForLog Internal device humidity for logging.
  * @return True if data sent successfully.
  */
-bool sendImageData_Img(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, uint8_t* jpegImage, size_t jpegLength, float* thermalData, LEDStatus& sysLed, float internalTempForLog, float internalHumForLog) {
+bool sendImageData_Img(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, const String& timestamp, uint8_t* jpegImage, size_t jpegLength, float* thermalData, LEDStatus& sysLed, float internalTempForLog) {
     // A visual image is now optional, but thermal data is mandatory for this call.
     if (!thermalData) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[ImgTasks] Error: Invalid data provided to sendImageData_Img (thermalData is null)."));
         #endif
         sysLed.setState(ERROR_DATA);
-        ErrorLogger::sendLog(sdMgr, timeMgr, api_obj.getBaseApiUrl() + cfg.apiLogPath, api_obj.getAccessToken(), LOG_TYPE_ERROR, "sendImageData_Img called with null thermal data.", internalTempForLog, internalHumForLog);
+        ErrorLogger::sendLog(sdMgr, timeMgr, api_obj.getBaseApiUrl() + cfg.apiLogPath, api_obj.getAccessToken(), LOG_TYPE_ERROR, "sendImageData_Img called with null thermal data.", internalTempForLog);
         return false;
     }
     
@@ -200,7 +196,7 @@ bool sendImageData_Img(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API&
     #endif
 
     // MultipartDataSender now handles the case where jpegImage is null.
-    int httpCode = MultipartDataSender::IOThermalAndImageData(fullUrl, token, thermalData, jpegImage, jpegLength);
+    int httpCode = MultipartDataSender::IOThermalAndImageData(fullUrl, token, timestamp, thermalData, jpegImage, jpegLength);
 
     if (httpCode >= 200 && httpCode < 300) {
         #ifdef ENABLE_DEBUG_SERIAL
@@ -221,7 +217,7 @@ bool sendImageData_Img(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API&
                 Serial.println(F("[ImgTasks] Token refresh successful. Re-trying capture data send..."));
             #endif
             token = api_obj.getAccessToken();
-            httpCode = MultipartDataSender::IOThermalAndImageData(fullUrl, token, thermalData, jpegImage, jpegLength);
+            httpCode = MultipartDataSender::IOThermalAndImageData(fullUrl, token, timestamp, thermalData, jpegImage, jpegLength);
             if (httpCode >= 200 && httpCode < 300) {
                 #ifdef ENABLE_DEBUG_SERIAL
                     Serial.println(F("[ImgTasks] Capture data sent successfully on retry."));
@@ -244,6 +240,9 @@ bool sendImageData_Img(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API&
  * @brief Orchestrates capturing and sending image data.
  * @param cfg Reference to config.
  * @param api_obj Reference to API object.
+ * @param sdMgr Reference to SDManager for file operations.
+ * @param timeMgr Reference to TimeManager for timestamping.
+ * @param timestamp Current timestamp as a string.
  * @param visCamera Reference to visual camera.
  * @param thermalSensor Reference to thermal camera.
  * @param sysLed Reference to LEDStatus.
@@ -252,17 +251,15 @@ bool sendImageData_Img(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API&
  * @param[out] jpegLength Output for JPEG length.
  * @param[out] thermalData Output for thermal data.
  * @param internalTempForLog Internal device temperature for logging.
- * @param internalHumForLog Internal device humidity for logging.
  * @return True if image capture AND send were successful.
  */
-bool performImageTasks_Img(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, OV2640Sensor& visCamera, MLX90640Sensor& thermalSensor, LEDStatus& sysLed,
-                           float lightLevel,
-                           uint8_t** jpegImage, size_t& jpegLength, float** thermalData, float internalTempForLog, float internalHumForLog) { 
+bool performImageTasks_Img(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, OV2640Sensor& visCamera, MLX90640Sensor& thermalSensor, LEDStatus& sysLed, float lightLevel, uint8_t** jpegImage, size_t& jpegLength, float** thermalData, float internalTempForLog) { 
 
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("\n[ImgTasks] --- Performing Image Data Tasks (Capture, Send, Archive) ---"));
     #endif
 
+    String timestamp = timeMgr.getCurrentTimestampString();
     *jpegImage = nullptr;
     jpegLength = 0;
     *thermalData = nullptr;
@@ -276,25 +273,25 @@ bool performImageTasks_Img(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, 
         #endif
     }
 
-    if (!captureAndCopyThermalData_Img(sdMgr, timeMgr, thermalSensor, thermalData, cfg, api_obj, internalTempForLog, internalHumForLog)) {
+    if (!captureAndCopyThermalData_Img(sdMgr, timeMgr, thermalSensor, thermalData, cfg, api_obj, internalTempForLog)) {
         return false;
     }
 
     if (captureVisual) {
-        if (!captureVisualJPEG_Img(sdMgr, timeMgr, visCamera, jpegImage, jpegLength, cfg, api_obj, internalTempForLog, internalHumForLog)) {
+        if (!captureVisualJPEG_Img(sdMgr, timeMgr, visCamera, jpegImage, jpegLength, cfg, api_obj, internalTempForLog)) {
             if (*thermalData != nullptr) { free(*thermalData); *thermalData = nullptr; }
             return false;
         }
     }
 
-    bool sentSuccessfully = sendImageData_Img(sdMgr, timeMgr, cfg, api_obj, *jpegImage, jpegLength, *thermalData, sysLed, internalTempForLog, internalHumForLog);
+    bool sentSuccessfully = sendImageData_Img(sdMgr, timeMgr, cfg, api_obj, timestamp, *jpegImage, jpegLength, *thermalData, sysLed, internalTempForLog);
 
     if (sdMgr.isSDAvailable()) {
         String baseFilename = timeMgr.getCurrentTimestampString(true);
         String targetDir = sentSuccessfully ? String(ARCHIVE_CAPTURES_DIR) : String(CAPTURE_PENDING_DIR);
         
         if (*thermalData) {
-            String thermalJsonString = MultipartDataSender::createThermalJson(*thermalData);
+            String thermalJsonString = MultipartDataSender::createThermalJson(timestamp, *thermalData);
             if (!thermalJsonString.isEmpty()) {
                 sdMgr.writeTextFile(targetDir + "/" + baseFilename + "_thermal.json", thermalJsonString);
             }

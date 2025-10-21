@@ -116,7 +116,7 @@ float SDManager::getUsageInfo(uint64_t& outUsedBytes, uint64_t& outTotalBytes) {
     return usagePercentage;
 }
 
-bool SDManager::logToFile(const String& timestamp, LogLevel level, const String& message, float internalTemp, float internalHum) {
+bool SDManager::logToFile(const String& timestamp, LogLevel level, const String& message, float internalTemp) {
     if (!_sdAvailable) return false;
 
     String datePart = timestamp.substring(0, 10); 
@@ -134,11 +134,7 @@ bool SDManager::logToFile(const String& timestamp, LogLevel level, const String&
 
     String logEntry = timestamp + " [" + logLevelToString(level) + "] " + message;
     if (!isnan(internalTemp)) {
-        logEntry += " (DevTemp: " + String(internalTemp, 1) + "C";
-        if (!isnan(internalHum)) {
-            logEntry += ", DevHum: " + String(internalHum, 0) + "%";
-        }
-        logEntry += ")";
+        logEntry += " (DevTemp: " + String(internalTemp, 1) + "C )";
     }
 
     logFile.println(logEntry);
@@ -471,7 +467,7 @@ static uint8_t* readBinaryFileToBuffer(const char* path, size_t& fileSize) {
 }
 
 
-bool SDManager::processPendingApiCalls(API& api_comm, TimeManager& timeMgr, Config& cfg, float internalTempForLog, float internalHumForLog) {
+bool SDManager::processPendingApiCalls(API& api_comm, TimeManager& timeMgr, Config& cfg, float internalTempForLog) {
     if (!_sdAvailable || !api_comm.isActivated() || WiFi.status() != WL_CONNECTED) {
         #ifdef ENABLE_DEBUG_SERIAL
             if (!_sdAvailable) Serial.println(F("[SDManager_Pending] SD not available."));
@@ -508,9 +504,11 @@ bool SDManager::processPendingApiCalls(API& api_comm, TimeManager& timeMgr, Conf
                     JsonDocument doc;
                     DeserializationError error = deserializeJson(doc, jsonData);
                     if (!error) {
-                        float light = doc["light"] | NAN; // Use NAN or suitable default if missing
+                        String timestamp = doc["timestamp"] | "0000-00-00_00:00:00";
+                        float light = doc["light"] | NAN; 
                         float temp = doc["temperature"] | NAN;
                         float hum = doc["humidity"] | NAN;
+                        float press = doc["pressure"] | NAN;
 
                         // Attempt to send (using a simplified direct call to IOEnvironmentData for this example)
                         // Note: IOEnvironmentData doesn't handle token refresh itself.
@@ -518,13 +516,13 @@ bool SDManager::processPendingApiCalls(API& api_comm, TimeManager& timeMgr, Conf
                         // and handles auth/refresh, or sendEnvironmentDataToServer_Env could be refactored.
                         // For now, using IOEnvironmentData directly with current access token.
                         String targetApiUrl = api_comm.getBaseApiUrl() + cfg.apiAmbientDataPath;
-                        int httpCode = EnvironmentDataJSON::IOEnvironmentData(targetApiUrl, api_comm.getAccessToken(), light, temp, hum);
+                        int httpCode = EnvironmentDataJSON::IOEnvironmentData(targetApiUrl, api_comm.getAccessToken(), timestamp, light, temp, hum, press);
 
                         if (httpCode == 200 || httpCode == 204) {
                             #ifdef ENABLE_DEBUG_SERIAL
                                 Serial.println("[SDManager_Pending] Successfully sent pending ambient data: " + fileNameOnly);
                             #endif
-                            ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::INFO, "Sent pending ambient data: " + fileNameOnly, internalTempForLog, internalHumForLog);
+                            ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::INFO, "Sent pending ambient data: " + fileNameOnly, internalTempForLog);
                             String archivePath = String(ARCHIVE_ENVIRONMENTAL_DIR) + "/" + fileNameOnly;
                             if (moveFile(filePath, archivePath)) {
                                 #ifdef ENABLE_DEBUG_SERIAL
@@ -534,7 +532,7 @@ bool SDManager::processPendingApiCalls(API& api_comm, TimeManager& timeMgr, Conf
                                 #ifdef ENABLE_DEBUG_SERIAL
                                     Serial.println("[SDManager_Pending] Failed to move ambient data to archive. Deleting from pending.");
                                 #endif
-                                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Failed to move sent ambient data to archive: " + fileNameOnly + ". Deleting.", internalTempForLog, internalHumForLog);
+                                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Failed to move sent ambient data to archive: " + fileNameOnly + ". Deleting.", internalTempForLog);
                                 deleteFile(filePath.c_str()); // Delete if move failed to prevent reprocessing
                             }
                         } else if (httpCode == 401) {
@@ -542,25 +540,25 @@ bool SDManager::processPendingApiCalls(API& api_comm, TimeManager& timeMgr, Conf
                                 Serial.println("[SDManager_Pending] Auth (401) error sending pending ambient data: " + fileNameOnly + ". Will retry later if token refreshes.");
                             #endif
                             // Let the main loop handle token refresh. File remains in pending.
-                            ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Auth error sending pending ambient: " + fileNameOnly + ". HTTP: " + String(httpCode), internalTempForLog, internalHumForLog);
+                            ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Auth error sending pending ambient: " + fileNameOnly + ". HTTP: " + String(httpCode), internalTempForLog);
                         }else {
                             #ifdef ENABLE_DEBUG_SERIAL
                                 Serial.println("[SDManager_Pending] Failed to send pending ambient data: " + fileNameOnly + ". HTTP Code: " + String(httpCode) + ". Will retry later.");
                             #endif
-                            ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Failed send pending ambient: " + fileNameOnly + ". HTTP: " + String(httpCode), internalTempForLog, internalHumForLog);
+                            ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Failed send pending ambient: " + fileNameOnly + ". HTTP: " + String(httpCode), internalTempForLog);
                         }
                     } else {
                         #ifdef ENABLE_DEBUG_SERIAL
                             Serial.println("[SDManager_Pending] Failed to parse JSON from pending ambient file: " + filePath + ". Error: " + error.c_str());
                         #endif
-                        ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Failed to parse pending ambient JSON: " + fileNameOnly, internalTempForLog, internalHumForLog);
+                        ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Failed to parse pending ambient JSON: " + fileNameOnly, internalTempForLog);
                         // Consider moving to a "corrupted_pending" directory or deleting. For now, leaves it.
                     }
                 } else {
                      #ifdef ENABLE_DEBUG_SERIAL
                         Serial.println("[SDManager_Pending] Pending ambient file is empty or failed to read: " + filePath);
                     #endif
-                    ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Empty/unreadable pending ambient file: " + fileNameOnly, internalTempForLog, internalHumForLog);
+                    ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Empty/unreadable pending ambient file: " + fileNameOnly, internalTempForLog);
                 }
                 entry = ambientPendingDir.openNextFile(); // Process next file
             } else {
@@ -627,32 +625,38 @@ bool SDManager::processPendingApiCalls(API& api_comm, TimeManager& timeMgr, Conf
             size_t jpegLength = 0;
             uint8_t* jpegImage = readBinaryFileToBuffer(visualJpgPath.c_str(), jpegLength);
 
-            // VERIFICACIÓN: Si alguno de los archivos está vacío o es ilegible, se borra el par.
-            if (thermalJsonContent.isEmpty() || !jpegImage || jpegLength == 0) {
-                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Unreadable/empty pending capture pair: " + baseName + ". Deleting.", internalTempForLog, internalHumForLog);
-                deleteFile(thermalJsonPath.c_str());
-                deleteFile(visualJpgPath.c_str());
-                if(jpegImage) free(jpegImage); // Liberar si el buffer se asignó pero el archivo estaba vacío
-                continue; // Pasar al siguiente archivo
+            // Extraer timestamp del JSON térmico
+            JsonDocument doc;
+            String timestamp = "0000-00-00_00:00:00";
+            DeserializationError error = deserializeJson(doc, thermalJsonContent);
+            if (!error) {
+                timestamp = doc["timestamp"] | timestamp;
             }
 
             float* thermalDataArray = parseThermalJson(thermalJsonContent);
             // VERIFICACIÓN: Si el JSON está corrupto, se borra el par.
             if (!thermalDataArray) {
-                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Corrupted pending JSON in pair: " + baseName + ". Deleting.", internalTempForLog, internalHumForLog);
+                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Corrupted pending JSON in pair: " + baseName + ". Deleting.", internalTempForLog);
                 deleteFile(thermalJsonPath.c_str());
                 deleteFile(visualJpgPath.c_str());
                 free(jpegImage);
                 continue; // Pasar al siguiente archivo
             }
 
-            int httpCode = MultipartDataSender::IOThermalAndImageData(api_comm.getBaseApiUrl() + cfg.apiCaptureDataPath, api_comm.getAccessToken(), thermalDataArray, jpegImage, jpegLength);
+            int httpCode = MultipartDataSender::IOThermalAndImageData(
+                api_comm.getBaseApiUrl() + cfg.apiCaptureDataPath,
+                api_comm.getAccessToken(),
+                timestamp, // <-- Agrega el timestamp aquí
+                thermalDataArray,
+                jpegImage,
+                jpegLength
+            );
 
             if (httpCode >= 200 && httpCode < 300) {
                 archiveFile(thermalJsonPath, String(ARCHIVE_CAPTURES_DIR) + "/" + thermalFileNameOnly);
                 archiveFile(visualJpgPath, String(ARCHIVE_CAPTURES_DIR) + "/" + visualFileNameOnly);
             } else {
-                 ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Failed to send pending pair " + baseName + ", HTTP: " + String(httpCode), internalTempForLog, internalHumForLog);
+                 ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Failed to send pending pair " + baseName + ", HTTP: " + String(httpCode), internalTempForLog);
             }
 
             free(thermalDataArray);
@@ -667,25 +671,38 @@ bool SDManager::processPendingApiCalls(API& api_comm, TimeManager& timeMgr, Conf
             String thermalJsonContent = readFileToString(thermalJsonPath.c_str());
             // VERIFICACIÓN: Si el archivo está vacío o es ilegible, se borra.
             if (thermalJsonContent.isEmpty()) {
-                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Unreadable pending thermal-only file: " + thermalFileNameOnly + ". Deleting.", internalTempForLog, internalHumForLog);
+                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Unreadable pending thermal-only file: " + thermalFileNameOnly + ". Deleting.", internalTempForLog);
                 deleteFile(thermalJsonPath.c_str());
                 continue; // Pasar al siguiente archivo
             }
 
+            JsonDocument doc;
+            String timestamp = "0000-00-00_00:00:00";
+            DeserializationError error = deserializeJson(doc, thermalJsonContent);
+            if (!error) {
+                timestamp = doc["timestamp"] | timestamp;
+            }
+
             float* thermalDataArray = parseThermalJson(thermalJsonContent);
-            // VERIFICACIÓN: Si el JSON está corrupto, se borra.
             if (!thermalDataArray) {
-                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Corrupted pending thermal-only JSON: " + thermalFileNameOnly + ". Deleting.", internalTempForLog, internalHumForLog);
+                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Corrupted pending thermal-only JSON: " + thermalFileNameOnly + ". Deleting.", internalTempForLog);
                 deleteFile(thermalJsonPath.c_str());
                 continue; // Pasar al siguiente archivo
             }
             
-            int httpCode = MultipartDataSender::IOThermalAndImageData(api_comm.getBaseApiUrl() + cfg.apiCaptureDataPath, api_comm.getAccessToken(), thermalDataArray, nullptr, 0);
+            int httpCode = MultipartDataSender::IOThermalAndImageData(
+            api_comm.getBaseApiUrl() + cfg.apiCaptureDataPath,
+            api_comm.getAccessToken(),
+            timestamp,
+            thermalDataArray,
+            nullptr,
+            0
+        );
 
             if (httpCode >= 200 && httpCode < 300) {
                 archiveFile(thermalJsonPath, String(ARCHIVE_CAPTURES_DIR) + "/" + thermalFileNameOnly);
             } else {
-                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Failed to send pending thermal-only " + baseName + ", HTTP: " + String(httpCode), internalTempForLog, internalHumForLog);
+                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Failed to send pending thermal-only " + baseName + ", HTTP: " + String(httpCode), internalTempForLog);
             }
             
             free(thermalDataArray);

@@ -20,8 +20,7 @@ bool ErrorLogger::sendLog(SDManager& sdManager,
                           const String& accessToken, 
                           const char* logType, 
                           const String& logMessage, 
-                          float internalTemp, 
-                          float internalHum) {
+                          float internalTemp) {
 
     // --- Step 1: Basic Parameter Validation ---
     if (logType == nullptr || logMessage.isEmpty()) {
@@ -47,11 +46,7 @@ bool ErrorLogger::sendLog(SDManager& sdManager,
             levelEnum = LogLevel::ERROR;
         }
         
-        localLogSuccess = sdManager.logToFile(timestamp, 
-                                              levelEnum,
-                                              logMessage, 
-                                              internalTemp, 
-                                              internalHum); //
+        localLogSuccess = sdManager.logToFile(timestamp, levelEnum, logMessage, internalTemp);
         #ifdef ENABLE_DEBUG_SERIAL
             if (localLogSuccess) {
                 Serial.printf("[ErrorLogger] Log successfully written to SD card. Timestamp: %s\n", timestamp.c_str());
@@ -66,7 +61,7 @@ bool ErrorLogger::sendLog(SDManager& sdManager,
     }
 
     // --- Step 4: Attempt to Send Log to Remote API (Conditionally) ---
-    if (WiFi.status() == WL_CONNECTED && !fullLogUrl.isEmpty()) { //
+    if (WiFi.status() == WL_CONNECTED && !fullLogUrl.isEmpty()) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[ErrorLogger] WiFi connected. Attempting to send log to remote API."));
             if (accessToken.isEmpty()) {
@@ -79,9 +74,6 @@ bool ErrorLogger::sendLog(SDManager& sdManager,
         doc["logMessage"] = logMessage;
         if (!isnan(internalTemp)) { 
             doc["internalDeviceTemperature"] = serialized(String(internalTemp, 2)); 
-        }
-        if (!isnan(internalHum)) { 
-            doc["internalDeviceHumidity"] = serialized(String(internalHum, 1));
         }
 
         String jsonPayload;
@@ -147,8 +139,7 @@ bool ErrorLogger::logToSdOnly(SDManager& sdManager,
                               TimeManager& timeManager,
                               LogLevel level,
                               const String& logMessage,
-                              float internalTemp,
-                              float internalHum) {
+                              float internalTemp) {
     // --- Step 1: Basic Parameter Validation ---
     if (logMessage.isEmpty()) {
         #ifdef ENABLE_DEBUG_SERIAL
@@ -165,14 +156,10 @@ bool ErrorLogger::logToSdOnly(SDManager& sdManager,
     }
 
     // --- Step 2: Get Timestamp ---
-    String timestamp = timeManager.getCurrentTimestampString(); //
+    String timestamp = timeManager.getCurrentTimestampString();
 
     // --- Step 3: Log Locally to SD Card ---
-    bool localLogSuccess = sdManager.logToFile(timestamp, 
-                                               level,
-                                               logMessage, 
-                                               internalTemp, 
-                                               internalHum); //
+    bool localLogSuccess = sdManager.logToFile(timestamp, level, logMessage, internalTemp);
     #ifdef ENABLE_DEBUG_SERIAL
         if (localLogSuccess) {
             Serial.printf("[ErrorLoggerSdOnly] Log successfully written to SD card. Timestamp: %s\n", timestamp.c_str());

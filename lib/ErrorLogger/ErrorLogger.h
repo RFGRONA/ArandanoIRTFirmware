@@ -32,7 +32,6 @@ public:
      * @param logType The type of log (e.g., LOG_TYPE_INFO).
      * @param logMessage The detailed log message (String).
      * @param internalTemp Optional. The internal temperature reading (float).
-     * @param internalHum Optional. The internal humidity reading (float).
      * @return `true` if the log was successfully saved to SD. The success of remote sending is handled internally.
      * Returns `false` if saving to SD fails or if essential parameters are missing for local logging.
      */
@@ -42,8 +41,7 @@ public:
                        const String& accessToken, 
                        const char* logType, 
                        const String& logMessage, 
-                       float internalTemp = NAN, 
-                       float internalHum = NAN);
+                       float internalTemp = NAN);
 
 /**
      * @brief Sends a log message exclusively to the local SD card.
@@ -56,7 +54,6 @@ public:
      * @param level The severity level of the log message (INFO, WARNING, ERROR from LogLevel enum in SDManager.h).
      * @param logMessage The detailed log message (String).
      * @param internalTemp Optional. The internal temperature reading (float).
-     * @param internalHum Optional. The internal humidity reading (float).
      * @return `true` if the log was successfully saved to SD. 
      * Returns `false` if saving to SD fails or if essential parameters are missing.
      */
@@ -64,8 +61,7 @@ public:
                             TimeManager& timeManager,
                             LogLevel level,
                             const String& logMessage,
-                            float internalTemp = NAN,
-                            float internalHum = NAN);
+                            float internalTemp = NAN);
 };
 
 #endif // ERRORLOGGER_H

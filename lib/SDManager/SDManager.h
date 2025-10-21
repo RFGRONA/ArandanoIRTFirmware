@@ -66,10 +66,9 @@ public:
      * @param level The severity level of the log message (INFO, WARNING, ERROR).
      * @param message The main log message content.
      * @param internalTemp Optional internal temperature reading to include in the log.
-     * @param internalHum Optional internal humidity reading to include in the log.
      * @return True if the log message was successfully written, false otherwise.
      */
-    bool logToFile(const String& timestamp, LogLevel level, const String& message, float internalTemp = NAN, float internalHum = NAN);
+    bool logToFile(const String& timestamp, LogLevel level, const String& message, float internalTemp = NAN);
 
     /**
      * @brief Saves application state (e.g., API tokens, activation status) as a JSON string to a file on the SD card.
@@ -158,10 +157,9 @@ public:
      * @param timeMgr Reference to the TimeManager object (for logging).
      * @param cfg Reference to the Config object (for API paths, etc.).
      * @param internalTempForLog Internal temperature for logging send attempts.
-     * @param internalHumForLog Internal humidity for logging send attempts.
      * @return True if any pending data was processed (successfully or not), false if no pending data found.
      */
-    bool processPendingApiCalls(API& api_comm, TimeManager& timeMgr, Config& cfg, float internalTempForLog = NAN, float internalHumForLog = NAN);
+    bool processPendingApiCalls(API& api_comm, TimeManager& timeMgr, Config& cfg, float internalTempForLog = NAN);
 
     /**
      * @brief Manages storage for logs and archived data based on age and disk space.

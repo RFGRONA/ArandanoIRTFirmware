@@ -48,6 +48,7 @@ public:
      *
      * @param fullCaptureDataUrl The complete URL (String) of the API endpoint for capture data.
      * @param accessToken The access token (String) for `Authorization: Device <token>` header.
+     * * @param timestamp The timestamp (String) to include in the JSON payload, formatted as ISO 8601.
      * @param thermalData Pointer to the float array (768 elements) of thermal readings.
      * @param jpegImage Pointer to the byte array (uint8_t*) of JPEG image data.
      * @param jpegLength The size (size_t) of the JPEG image data in bytes.
@@ -57,6 +58,7 @@ public:
      static int IOThermalAndImageData( 
         const String& fullCaptureDataUrl,
         const String& accessToken,
+        const String& timestamp,
         float* thermalData,
         uint8_t* jpegImage,
         size_t jpegLength
@@ -65,10 +67,11 @@ public:
     /**
      * @brief Creates a JSON object string containing thermal statistics and the raw data array.
      * Formats the data including max, min, average, and the full temperature array.
+     * @param timestamp The timestamp (String) to include in the JSON payload, formatted as ISO 8601.
      * @param thermalData Pointer to the float array (THERMAL_PIXELS elements) of temperatures.
      * @return String containing the formatted JSON payload. Returns an empty string on allocation or calculation failure.
      */
-    static String createThermalJson(float* thermalData);
+    static String createThermalJson(const String& timestamp, float* thermalData);
 
 
     // --- Thermal Data Calculation Helpers ---

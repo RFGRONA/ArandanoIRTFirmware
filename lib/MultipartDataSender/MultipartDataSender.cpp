@@ -16,6 +16,7 @@
 /* static */ int MultipartDataSender::IOThermalAndImageData(
     const String& fullCaptureDataUrl,
     const String& accessToken,
+    const String& timestamp,
     float* thermalData,
     uint8_t* jpegImage,
     size_t jpegLength
@@ -42,7 +43,7 @@
     }
 
     // --- Step 2: Create JSON Payload for Thermal Data ---
-    String thermalJsonString = createThermalJson(thermalData);
+    String thermalJsonString = createThermalJson(timestamp, thermalData);
     if (thermalJsonString.isEmpty()) {
         #ifdef ENABLE_DEBUG_SERIAL
           Serial.println(F("[MultipartSender Error] Failed to create thermal JSON."));
@@ -72,7 +73,7 @@
 /**
  * @brief Creates a JSON object string including raw temperatures, max, min, and average.
  */
-/* static */ String MultipartDataSender::createThermalJson(float* thermalData) {
+/* static */ String MultipartDataSender::createThermalJson(const String& timestamp, float* thermalData) {
     // Calculate statistics first
     float maxTemp = calculateMaxTemperature(thermalData);
     float minTemp = calculateMinTemperature(thermalData);
@@ -86,7 +87,7 @@
     }
 
     JsonDocument doc;
-
+    doc["timestamp"] = timestamp;
     doc["max_temp"] = maxTemp;
     doc["min_temp"] = minTemp;
     doc["avg_temp"] = avgTemp;
