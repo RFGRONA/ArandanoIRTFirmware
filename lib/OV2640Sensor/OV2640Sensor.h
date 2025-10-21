@@ -10,8 +10,7 @@
 #ifndef OV2640SENSOR_H
 #define OV2640SENSOR_H
 
-#include <Arduino.h>
-#include "esp_camera.h"      // ESP-IDF camera driver functions and types (camera_fb_t, etc.)
+#include <Arduino.h>  
 #include "esp_heap_caps.h"   // For memory allocation functions like ps_malloc (allocating in PSRAM)
 
 /**

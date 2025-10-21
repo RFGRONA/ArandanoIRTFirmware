@@ -1,17 +1,37 @@
 // lib/BME280Sensor/BME280Sensor.cpp
 #include "BME280Sensor.h"
+#include <Adafruit_BME280.h>
 
 /**
- * @brief Constructor. Inicializa las referencias y la bandera de estado.
+ * @brief Constructor. Asigna memoria para _bme y guarda la referencia a TwoWire.
  */
-BME280Sensor::BME280Sensor(TwoWire &wire) : _bme(), _wire(wire), _isInitialized(false) {}
+BME280Sensor::BME280Sensor(TwoWire &wire) : _wire(wire), _isInitialized(false) {
+    // Ya no usamos la lista de inicialización para _bme
+    // Creamos el objeto en el heap (memoria dinámica)
+    _bme = new Adafruit_BME280(); 
+}
+
+/**
+ * @brief Destructor. Libera la memoria asignada a _bme.
+ */
+BME280Sensor::~BME280Sensor() {
+    delete _bme; // Liberamos la memoria para evitar fugas
+}
 
 /**
  * @brief Inicializa el sensor BME280.
  */
 bool BME280Sensor::begin(uint8_t i2c_addr) {
     // El bus I2C (Wire.begin) debe ser inicializado antes de llamar a esta función.
-    _isInitialized = _bme.begin(i2c_addr, &_wire);
+    
+    // Comprobación de seguridad por si falló el 'new'
+    if (!_bme) { 
+        _isInitialized = false;
+        return false;
+    }
+    
+    // Usamos '->' (puntero) en lugar de '.' (objeto)
+    _isInitialized = _bme->begin(i2c_addr, &_wire);
     return _isInitialized;
 }
 
@@ -22,7 +42,8 @@ float BME280Sensor::readTemperature() {
     if (!_isInitialized) {
         return NAN; // Not a Number
     }
-    return _bme.readTemperature();
+    // Usamos '->'
+    return _bme->readTemperature();
 }
 
 /**
@@ -32,7 +53,8 @@ float BME280Sensor::readHumidity() {
     if (!_isInitialized) {
         return NAN;
     }
-    return _bme.readHumidity();
+    // Usamos '->'
+    return _bme->readHumidity();
 }
 
 /**
@@ -42,6 +64,7 @@ float BME280Sensor::readPressure() {
     if (!_isInitialized) {
         return NAN;
     }
+    // Usamos '->'
     // La librería devuelve la presión en Pascales (Pa). La convertimos a hPa.
-    return _bme.readPressure() / 100.0F;
+    return _bme->readPressure() / 100.0F;
 }

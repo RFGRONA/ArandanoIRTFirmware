@@ -1,8 +1,9 @@
 #ifndef BME280_SENSOR_H
 #define BME280_SENSOR_H
 
-#include <Adafruit_BME280.h>
 #include <Wire.h>
+
+class Adafruit_BME280; 
 
 /**
  * @class BME280Sensor
@@ -16,6 +17,11 @@ public:
      * @param wire Referencia a la instancia de TwoWire (bus I2C) a utilizar.
      */
     BME280Sensor(TwoWire &wire);
+
+    /**
+     * @brief Destructor. Libera la memoria del objeto _bme.
+     */
+    ~BME280Sensor(); 
 
     /**
      * @brief Inicializa el sensor BME280 en el bus I2C.
@@ -43,9 +49,9 @@ public:
     float readPressure();
 
 private:
-    Adafruit_BME280 _bme; ///< Instancia de la librería base de Adafruit.
-    TwoWire &_wire;       ///< Referencia al bus I2C.
-    bool _isInitialized;  ///< Bandera para saber si el sensor fue inicializado.
+    Adafruit_BME280* _bme;  
+    TwoWire &_wire;       
+    bool _isInitialized;  
 };
 
 #endif // BME280_SENSOR_H

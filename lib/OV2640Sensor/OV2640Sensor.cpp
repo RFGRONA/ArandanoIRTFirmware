@@ -3,6 +3,7 @@
  * @brief Implements the OV2640Sensor wrapper class using the ESP-IDF camera driver.
  */
 #include "OV2640Sensor.h"
+#include "esp_camera.h"   
 
 // --- Hardware Pin Configuration ---
 // Pin definition for the specific ESP32-S3 board used (e.g., ESP32-S3-WROOM-1 N16R8 variant)
