@@ -39,10 +39,9 @@ void ledBlink_Ctrl(LEDStatus& sysLed);
  * @param api_obj A reference to the API object.
  * @param status_led A reference to the LEDStatus object.
  * @param internalTempForLog Internal temperature to include in logs.
- * @param internalHumForLog Internal humidity to include in logs.
  * @return true if the device is activated, authenticated, and ready.
  */
-bool handleApiAuthenticationAndActivation_Ctrl(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, LEDStatus& status_led, float internalTempForLog, float internalHumForLog);
+bool handleApiAuthenticationAndActivation_Ctrl(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, LEDStatus& status_led, float internalTempForLog);
 
 /** @brief Frees allocated memory buffers for JPEG image and thermal data.
  * Does NOT deinitialize the camera.

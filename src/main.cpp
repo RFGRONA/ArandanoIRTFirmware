@@ -19,18 +19,17 @@
 #include "esp_sntp.h"
 
 // --- Local Libraries (Project Specific Classes from lib/) ---
-#include "DHT22Sensor.h"
+#include "OV2640Sensor.h"
+#include "BME280Sensor.h"
 #include "BH1750Sensor.h"
 #include "MLX90640Sensor.h"
-#include "OV2640Sensor.h"
 #include "LEDStatus.h"
 #include "WiFiManager.h"
 #include "API.h"
-#include "DHT11Sensor.h"
 #include "ErrorLogger.h"
 #include "SDManager.h"
 #include "TimeManager.h"
-#include "FanController.h"
+#include "DS18B20Sensor.h" 
 
 // --- Modularized Helper Files (from src/) ---
 #include "ConfigManager.h"
@@ -42,9 +41,7 @@
 // --- Hardware Pin Definitions ---
 #define I2C_SDA_PIN 47
 #define I2C_SCL_PIN 21
-#define DHT_EXTERNAL_PIN 14
-#define DHT11_INTERNAL_PIN 41
-#define FAN_RELAY_PIN 42
+#define TEMP_INTERNAL_PIN 14
 
 // --- Fan Control Thresholds ---
 #define FAN_ON_TEMP_C           20.0f
@@ -55,6 +52,7 @@
 #define AUTH_RETRY_DELAY_MS             5000
 #define COLOMBIA_GMT_OFFSET_SEC         (-5 * 3600L)
 #define COLOMBIA_DAYLIGHT_OFFSET_SEC    0
+#define ERROR_RESTART_DELAY_MS          1800 // 30 minutes
 
 // --- Global Variables ---
 static time_t lastNtpSyncEpochTime = 0;
@@ -66,16 +64,14 @@ LEDStatus led;
 WiFiManager wifiManager;
 API* api_comm = nullptr;
 
-DHT22Sensor dhtExternalSensor(DHT_EXTERNAL_PIN);
-DHT11Sensor dhtInternalSensor(DHT11_INTERNAL_PIN);
 BH1750Sensor lightSensor(Wire);
 MLX90640Sensor thermalSensor(Wire);
 OV2640Sensor camera;
-FanController fanController(FAN_RELAY_PIN, false);
+BME280Sensor bmeExternalSensor(Wire);
+DS18B20Sensor dsInternalSensor(TEMP_INTERNAL_PIN);
 
 // --- State Variables ---
 static time_t nextDataCollectionEpochTime = 0;
-static bool continuousCoolingActive = false;
 static bool sdUsageWarning90PercentSent = false;
 
 // =========================================================================
@@ -136,7 +132,7 @@ void setup() {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[MainSetup] CRITICAL: API object allocation failed. Halting."));
         #endif
-        delay(1800); // 30 minutes
+        delay(ERROR_RESTART_DELAY_MS); 
         ESP.restart();
     }
     
@@ -155,19 +151,14 @@ void setup() {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[MainSetup] CRITICAL: NTP init failed. Halting."));
         #endif
-        delay(1800); // 30 minutes
+        delay(ERROR_RESTART_DELAY_MS); 
         ESP.restart();
     }
 
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println(F("[MainSetup] Initializing Internal DHT11 Sensor..."));
+        Serial.println(F("[MainSetup] Initializing Internal DS18B20 Sensor..."));
     #endif
-    dhtInternalSensor.begin();
-
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println(F("[MainSetup] Initializing Fan Controller..."));
-    #endif
-    fanController.begin(); 
+    dsInternalSensor.begin();
 
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("[MainSetup] Initializing I2C bus..."));
@@ -177,7 +168,7 @@ void setup() {
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("[MainSetup] Initializing external sensors..."));
     #endif
-    if (!initializeSensors_Sys(dhtExternalSensor, lightSensor, thermalSensor, camera)) { 
+    if (!initializeSensors_Sys(bmeExternalSensor, lightSensor, thermalSensor, camera)) { 
         ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::ERROR, "External sensor init failed in setup.");
         led.setState(ERROR_SENSOR);
         handleSensorInitFailure_Sys();
@@ -185,9 +176,9 @@ void setup() {
     
     String setupCompleteMsg = "Device setup completed. Initial Time: " + timeManager.getCurrentTimestampString();
     if (api_comm && api_comm->isActivated()){
-         ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), LOG_TYPE_INFO, setupCompleteMsg, NAN, NAN);
+         ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), LOG_TYPE_INFO, setupCompleteMsg, NAN);
     } else {
-         ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::INFO, setupCompleteMsg, NAN, NAN);
+         ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::INFO, setupCompleteMsg, NAN);
     }
 
     #ifdef ENABLE_DEBUG_SERIAL
@@ -203,21 +194,7 @@ void setup() {
 void loop() {
 
     // --- 1. Quick, continuous checks (runs on every single loop pass) ---
-    float internalTemp = dhtInternalSensor.readTemperature();
-    // Fan Control remains here to be responsive.
-    if (!isnan(internalTemp)) {
-        if (continuousCoolingActive) {
-            if (internalTemp < FAN_OFF_TEMP_C) {
-                fanController.turnOff();
-                continuousCoolingActive = false;
-            }
-        } else {
-            if (internalTemp > FAN_ON_TEMP_C) {
-                fanController.turnOn();
-                continuousCoolingActive = true;
-            }
-        }
-    }
+    float internalTemp = dsInternalSensor.readTemperature();
 
     // --- 2. Timing Gate: Check if it's time to run the data collection cycle ---
     time_t currentTime = timeManager.getCurrentEpochTime();
@@ -236,7 +213,6 @@ void loop() {
     
     // --- 3A. Backend & Auth Check with new granular logic ---
     bool proceedWithDataCollection = false; // Default to not proceeding until a valid state is confirmed.
-    float internalHumForAuth = dhtInternalSensor.readHumidity();
 
     for (int attempt = 1; attempt <= AUTH_MAX_RETRIES; ++attempt) {
         int resultCode = 0;
@@ -246,7 +222,7 @@ void loop() {
             #ifdef ENABLE_DEBUG_SERIAL
                 Serial.printf("[MainLoop] Device not activated. Attempting activation (%d/%d)...\n", attempt, AUTH_MAX_RETRIES);
             #endif
-            if (handleApiAuthenticationAndActivation_Ctrl(sdManager, timeManager, config, *api_comm, led, internalTemp, internalHumForAuth)) {
+            if (handleApiAuthenticationAndActivation_Ctrl(sdManager, timeManager, config, *api_comm, led, internalTemp)) {
                 proceedWithDataCollection = true; // Activation successful!
                 break;
             }
@@ -304,7 +280,7 @@ void loop() {
     bool cycleStatusOK = true;
 
     // perform...Tasks functions will internally handle failed sends by saving to pending.
-    if (!performEnvironmentTasks_Env(sdManager, timeManager, config, *api_comm, lightSensor, dhtExternalSensor, led, internalTemp, internalHumForAuth)) {
+    if (!performEnvironmentTasks_Env(sdManager, timeManager, config, *api_comm, lightSensor, bmeExternalSensor, led, internalTemp)) {
         cycleStatusOK = false;
     }
     
@@ -312,9 +288,7 @@ void loop() {
     size_t localJpegLength = 0;
     float* localThermalData = nullptr;
     if (cycleStatusOK) {
-        if (!performImageTasks_Img(sdManager, timeManager, config, *api_comm, camera, thermalSensor, led, 
-                                               lightLevel,
-                                               &localJpegImage, localJpegLength, &localThermalData, internalTemp, internalHumForAuth)) {
+        if (!performImageTasks_Img(sdManager, timeManager, config, *api_comm, camera, thermalSensor, led, lightLevel, &localJpegImage, localJpegLength, &localThermalData, internalTemp)) {
             cycleStatusOK = false;
         }
     }
@@ -322,7 +296,7 @@ void loop() {
     // --- 3D. End-of-Cycle Signaling & Cleanup ---
     const char* logType = cycleStatusOK ? LOG_TYPE_INFO : LOG_TYPE_WARNING;
     String logMessage = cycleStatusOK ? "Main data cycle completed successfully." : "Main data cycle completed with errors.";
-    ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), logType, logMessage, internalTemp, internalHumForAuth);
+    ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), logType, logMessage, internalTemp);
     
     ledBlink_Ctrl(led);
     led.setState(OFF);
@@ -331,7 +305,7 @@ void loop() {
     cleanupImageBuffers_Ctrl(localJpegImage, localThermalData);
 
     if (wifiManager.getConnectionStatus() == WiFiManager::CONNECTED) {
-        sdManager.processPendingApiCalls(*api_comm, timeManager, config, internalTemp, internalHumForAuth);
+        sdManager.processPendingApiCalls(*api_comm, timeManager, config, internalTemp);
     }
     
     if (sdManager.isSDAvailable()) {
@@ -341,11 +315,11 @@ void loop() {
         float usagePercent = sdManager.getUsageInfo(sdUsed, sdTotal);
         if (usagePercent >= 90.0f && !sdUsageWarning90PercentSent) {
             String msg = "CRITICAL WARNING: SD Card usage is at " + String(usagePercent, 1) + "%";
-            ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), LOG_TYPE_WARNING, msg, internalTemp, internalHumForAuth);
+            ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), LOG_TYPE_WARNING, msg, internalTemp);
             sdUsageWarning90PercentSent = true;
         } else if (usagePercent < 85.0f && sdUsageWarning90PercentSent) {
             String msg = "INFO: SD Card usage is now " + String(usagePercent, 1) + "%. Warning resolved.";
-            ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), LOG_TYPE_INFO, msg, internalTemp, internalHumForAuth);
+            ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), LOG_TYPE_INFO, msg, internalTemp);
             sdUsageWarning90PercentSent = false;
         }
     }

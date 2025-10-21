@@ -81,10 +81,9 @@ void ledBlink_Ctrl(LEDStatus& sysLed) {
  * @param api_obj Reference to the API communication object.
  * @param status_led Reference to the LEDStatus object for visual feedback.
  * @param internalTempForLog Internal temperature to include in logs.
- * @param internalHumForLog Internal humidity to include in logs.
  * @return True if API is ready (activated and authenticated), false otherwise.
  */
-bool handleApiAuthenticationAndActivation_Ctrl(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, LEDStatus& status_led, float internalTempForLog, float internalHumForLog) { 
+bool handleApiAuthenticationAndActivation_Ctrl(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, LEDStatus& status_led, float internalTempForLog) { 
     String logUrl = api_obj.getBaseApiUrl() + cfg.apiLogPath;
 
     if (!api_obj.isActivated()) {
@@ -99,13 +98,13 @@ bool handleApiAuthenticationAndActivation_Ctrl(SDManager& sdMgr, TimeManager& ti
             #ifdef ENABLE_DEBUG_SERIAL
                 Serial.println(F("[Ctrl_API] Activation successful (HTTP 200)."));
             #endif
-            ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, api_obj.getAccessToken(), LOG_TYPE_INFO, "Device activated successfully. DeviceID: " + String(cfg.deviceId), internalTempForLog, internalHumForLog);
+            ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, api_obj.getAccessToken(), LOG_TYPE_INFO, "Device activated successfully. DeviceID: " + String(cfg.deviceId), internalTempForLog);
         } else {
             #ifdef ENABLE_DEBUG_SERIAL
                 Serial.printf("[Ctrl_API] Activation failed. HTTP Code: %d\n", activationHttpCode);
             #endif
             status_led.setState(ERROR_AUTH);
-            ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, "", LOG_TYPE_ERROR, "Device activation failed. HTTP Code: " + String(activationHttpCode) + ", DeviceID: " + String(cfg.deviceId), internalTempForLog, internalHumForLog);
+            ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, "", LOG_TYPE_ERROR, "Device activation failed. HTTP Code: " + String(activationHttpCode) + ", DeviceID: " + String(cfg.deviceId), internalTempForLog);
             return false;
         }
     }
@@ -133,7 +132,7 @@ bool handleApiAuthenticationAndActivation_Ctrl(SDManager& sdMgr, TimeManager& ti
         if (!api_obj.isActivated()) { // api_obj.checkBackendAndAuth might deactivate on critical refresh failure
             errorMessage += ". Device has been deactivated.";
         }
-        ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, api_obj.getAccessToken(), LOG_TYPE_ERROR, errorMessage, internalTempForLog, internalHumForLog);
+        ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, api_obj.getAccessToken(), LOG_TYPE_ERROR, errorMessage, internalTempForLog);
         return false;
     }
 }
