@@ -180,6 +180,22 @@ public:
      */
     float getUsageInfo(uint64_t& outUsedBytes, uint64_t& outTotalBytes);
 
+    /**
+     * @brief Lista los archivos en un directorio y devuelve un string JSON.
+     * @param dirname El path del directorio a listar (ej. LOG_DIR).
+     * @return Un String conteniendo un array JSON (ej. ["log1.txt", "log2.txt"]).
+     */
+    String listLogFilesJSON(const char* dirname);
+
+    /**
+     * @brief Abre un archivo de log para lectura.
+     * El portal web usará esto para "streamear" el archivo al cliente.
+     * @param path El path completo del archivo a abrir (ej. "/logs/LOG_...txt").
+     * @return Un objeto File. Si el archivo no se encuentra o es un directorio,
+     * el objeto File evaluará a 'false'.
+     */
+    File getLogFile(const String& path);
+
 private:
     bool _sdAvailable; // Flag to indicate if SD card is initialized and ready
 

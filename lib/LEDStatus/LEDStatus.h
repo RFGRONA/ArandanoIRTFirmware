@@ -28,7 +28,8 @@ enum LEDState {
     SENDING_DATA,    ///< State: Currently sending data via HTTP. Color: Green.
     CONNECTING_WIFI, ///< State: Attempting to connect to WiFi network. Color: Yellow.
     ERROR_WIFI,      ///< State: Failed to connect to WiFi network. Color: Pink.
-    ERROR_TIMER      ///< State: Filed to sinchronize time. Color: Dark Orange/Amber.
+    ERROR_TIMER,     ///< State: Failed to sinchronize time. Color: Dark Orange/Amber.
+    CONFIG_MODE_AP  ///< State: In configuration mode (Access Point). Color: Teal (Cyan-Green).
 };
 
 /**

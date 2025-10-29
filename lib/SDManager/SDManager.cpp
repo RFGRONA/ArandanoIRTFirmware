@@ -1,6 +1,7 @@
 // lib/SDManager/SDManager.cpp
 #include "SDManager.h"
 #include "TimeManager.h" // Required for timeMgr
+#include <ArduinoJson.h>
 
 #define SD_CARD_MMC_CLK_PIN 39
 #define SD_CARD_MMC_CMD_PIN 38
@@ -393,6 +394,57 @@ bool SDManager::deleteFile(const char* path) {
         #endif
         return false;
     }
+}
+
+String SDManager::listLogFilesJSON(const char* dirname) {
+    String jsonOutput = "[]"; // Devuelve un array vacío por defecto
+    if (!_sdAvailable) return jsonOutput;
+
+    File root = SD_MMC.open(dirname);
+    if (!root || !root.isDirectory()) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[SDManager] listLogFilesJSON: No se pudo abrir el directorio: %s\n", dirname);
+        #endif
+        if(root) root.close();
+        return jsonOutput;
+    }
+
+    DynamicJsonDocument doc(1024); // Ajusta el tamaño si esperas muchísimos archivos
+    JsonArray filesArray = doc.to<JsonArray>();
+
+    File file = root.openNextFile();
+    while (file) {
+        if (!file.isDirectory()) {
+            filesArray.add(file.name());
+        }
+        file.close();
+        file = root.openNextFile();
+    }
+    root.close();
+
+    serializeJson(doc, jsonOutput);
+    return jsonOutput;
+}
+
+
+File SDManager::getLogFile(const String& path) {
+    if (!_sdAvailable) {
+        return File(); // Devuelve un objeto File inválido
+    }
+
+    File file = SD_MMC.open(path.c_str(), FILE_READ);
+    
+    // Comprueba que el archivo se abrió y que NO es un directorio
+    if (!file || file.isDirectory()) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.printf("[SDManager] getLogFile: No se pudo abrir el archivo o es un directorio: %s\n", path.c_str());
+        #endif
+        if(file) file.close(); // Cierra si era un directorio
+        return File(); // Devuelve un objeto File inválido
+    }
+    
+    // Devuelve el objeto File abierto. El llamador (WebPortal) se encargará de cerrarlo.
+    return file;
 }
 
 // Helper function to read a text file from SD into a String

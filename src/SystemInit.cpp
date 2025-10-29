@@ -180,18 +180,16 @@ bool initializeWiFi_Sys(WiFiManager& wifiMgr, LEDStatus& led, Config& cfg, API* 
             Serial.printf("[SysInit_WiFi] Connection attempt #%d/%d...\n", attempt, WIFI_SETUP_MAX_RETRIES);
         #endif
         
-        wifiMgr.connectToWiFi(); // This is a non-blocking call that starts the connection process
+        wifiMgr.connectToWiFi(); 
 
-        // Wait for connection with a timeout
         unsigned long attemptStartTime = millis();
         while (millis() - attemptStartTime < WIFI_CONNECT_TIMEOUT) {
-            // wifiMgr.handleWiFi() is not needed here as we use event-driven status
             if (wifiMgr.getConnectionStatus() == WiFiManager::CONNECTED) {
                 #ifdef ENABLE_DEBUG_SERIAL
                     Serial.println(F("[SysInit_WiFi] WiFi connected successfully."));
                 #endif
                 led.setState(ALL_OK);
-                return true;
+                return true; 
             }
             delay(100);
         }
@@ -211,24 +209,14 @@ bool initializeWiFi_Sys(WiFiManager& wifiMgr, LEDStatus& led, Config& cfg, API* 
         }
     }
     
-    // All retries failed, this is a critical failure.
-    String errorMsg = "CRITICAL: All WiFi connection attempts failed. Halting.";
+    String errorMsg = "CRITICAL: All WiFi connection attempts failed. Returning to main loop."; 
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println("[SysInit_WiFi] " + errorMsg);
     #endif
     led.setState(ERROR_WIFI);
     ErrorLogger::logToSdOnly(sdMgr, timeMgr, LogLevel::ERROR, errorMsg);
-    
-    // Halt the system
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println(F("--- SYSTEM HALTED ---"));
-        Serial.flush();
-    #endif
-    while(1) {
-        delay(1000);
-    }
 
-    return false; // Should not be reached
+    return false;
 }
 
 

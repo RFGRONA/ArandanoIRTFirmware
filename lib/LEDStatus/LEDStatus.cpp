@@ -96,6 +96,9 @@ void LEDStatus::setState(LEDState state) {
         case ERROR_TIMER:  // Internal temperature high, fans are ON
             setColor(139, 0, 0);   // Dark Red 
             break;
+        case CONFIG_MODE_AP:  // In Access Point Configuration Mode
+            setColor(0, 128, 128); // Teal (Green + Blue)
+            break;
         default:              // Handle any undefined or future states
             pixels.clear();
             pixels.show();

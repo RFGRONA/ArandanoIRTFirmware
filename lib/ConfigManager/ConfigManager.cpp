@@ -47,6 +47,22 @@ bool initFilesystem() { // Matched prototype
 }
 
 /**
+ * @brief Loads configuration from the default config file.
+ * This is a convenience wrapper around loadConfiguration().
+ */
+void loadConfigurationFromFile() {
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println("[ConfigMgr] Loading configuration from default file: " + String(CONFIG_FILENAME));
+    #endif
+    if (!loadConfiguration(CONFIG_FILENAME)) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("[ConfigMgr] Warning: loadConfiguration failed or file not found. Using default config values.");
+        #endif
+        // 'config' struct will retain its default values if loading fails.
+    }
+}
+
+/**
  * @brief Loads configuration from a JSON file on LittleFS into the global 'config' struct.
  * Reads the specified file, parses its JSON content, and updates the members
  * of the global `config` object. If the file doesn't exist, cannot be opened,
@@ -83,16 +99,16 @@ bool loadConfiguration(const char *filename) {
     config.wifi_ssid = doc["wifi_ssid"] | config.wifi_ssid;
     config.wifi_pass = doc["wifi_pass"] | config.wifi_pass;
 
-    config.deviceId = doc["FIRMWARE_DEVICE_ID"] | config.deviceId; // Matched your original key
-    config.activationCode = doc["FIRMWARE_ACTIVATION_CODE"] | config.activationCode; // Matched your original key
+    config.deviceId = doc["deviceId"] | config.deviceId;
+    config.activationCode = doc["activationCode"] | config.activationCode;
 
-    config.apiBaseUrl = doc["api_base_url"] | config.apiBaseUrl;
-    config.apiActivatePath = doc["api_activate_path"] | config.apiActivatePath;
-    config.apiAuthPath = doc["api_auth_path"] | config.apiAuthPath;
-    config.apiRefreshTokenPath = doc["api_refresh_token_path"] | config.apiRefreshTokenPath;
-    config.apiLogPath = doc["api_log_path"] | config.apiLogPath;
-    config.apiAmbientDataPath = doc["api_ambient_data_path"] | config.apiAmbientDataPath;
-    config.apiCaptureDataPath = doc["api_capture_data_path"] | config.apiCaptureDataPath;
+    config.apiBaseUrl = doc["apiBaseUrl"] | config.apiBaseUrl;
+    config.apiActivatePath = doc["apiActivatePath"] | config.apiActivatePath;
+    config.apiAuthPath = doc["apiAuthPath"] | config.apiAuthPath;
+    config.apiRefreshTokenPath = doc["apiRefreshTokenPath"] | config.apiRefreshTokenPath;
+    config.apiLogPath = doc["apiLogPath"] | config.apiLogPath;
+    config.apiAmbientDataPath = doc["apiAmbientDataPath"] | config.apiAmbientDataPath;
+    config.apiCaptureDataPath = doc["apiCaptureDataPath"] | config.apiCaptureDataPath;
 
     config.data_interval_minutes = doc["data_interval_minutes"] | config.data_interval_minutes;
 
@@ -113,18 +129,36 @@ bool loadConfiguration(const char *filename) {
 }
 
 /**
- * @brief Loads configuration from the default config file.
- * This is a convenience wrapper around loadConfiguration().
- * It does NOT set WiFi credentials; that should be done in main after calling this.
+ * @brief Guarda un string JSON como el nuevo archivo de configuración.
+ * Sobrescribe el /config.json existente.
+ * @param jsonString El string de configuración en formato JSON.
+ * @return True si se guardó correctamente, false si falló la escritura.
  */
-void loadConfigurationFromFile() { // Renamed from loadConfigAndSetCredentials
+bool saveConfiguration(const String& jsonString) {
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("[ConfigMgr] Loading configuration from default file: " + String(CONFIG_FILENAME));
+        Serial.println("[ConfigMgr] Abriendo archivo de configuración para escritura: " + String(CONFIG_FILENAME));
     #endif
-    if (!loadConfiguration(CONFIG_FILENAME)) {
+
+    File configFile = LittleFS.open(CONFIG_FILENAME, "w"); // "w" = write (escribe desde cero)
+    if (!configFile) {
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("[ConfigMgr] Warning: loadConfiguration failed or file not found. Using default config values.");
+            Serial.println("[ConfigMgr] ERROR: No se pudo abrir el archivo de config para escritura.");
         #endif
-        // 'config' struct will retain its default values if loading fails.
+        return false;
+    }
+
+    size_t bytesWritten = configFile.print(jsonString);
+    configFile.close();
+
+    if (bytesWritten == jsonString.length()) {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("[ConfigMgr] Configuración guardada exitosamente.");
+        #endif
+        return true;
+    } else {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("[ConfigMgr] ERROR: Falla al escribir en el archivo de config.");
+        #endif
+        return false;
     }
 }

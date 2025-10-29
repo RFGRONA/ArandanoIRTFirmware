@@ -30,6 +30,7 @@
 #include "SDManager.h"
 #include "TimeManager.h"
 #include "DS18B20Sensor.h" 
+#include "WebPortal.h"
 
 // --- Modularized Helper Files (from src/) ---
 #include "ConfigManager.h"
@@ -63,6 +64,7 @@ TimeManager timeManager;
 LEDStatus led;
 WiFiManager wifiManager;
 API* api_comm = nullptr;
+WebPortal webPortal(sdManager);
 
 BH1750Sensor lightSensor(Wire);
 MLX90640Sensor thermalSensor(Wire);
@@ -73,6 +75,7 @@ DS18B20Sensor dsInternalSensor(TEMP_INTERNAL_PIN);
 // --- State Variables ---
 static time_t nextDataCollectionEpochTime = 0;
 static bool sdUsageWarning90PercentSent = false;
+static bool isInConfigMode = false;
 
 // =========================================================================
 // ===                           SETUP FUNCTION                          ===
@@ -135,12 +138,35 @@ void setup() {
         delay(ERROR_RESTART_DELAY_MS); 
         ESP.restart();
     }
-    
-    // --- ROBUST STARTUP SEQUENCE ---
+
+    // --- WiFi Connection & Web Portal Setup ---
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println(F("[MainSetup] Executing robust WiFi startup..."));
+        Serial.println(F("[MainSetup] Iniciando lógica de conexión y portal..."));
     #endif
-    initializeWiFi_Sys(wifiManager, led, config, api_comm, sdManager, timeManager, camera);
+
+    bool wifiSuccess = false;
+    
+    if (config.wifi_ssid.length() == 0 || config.wifi_ssid == "DEFAULT_SSID") {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[MainSetup] No hay configuración WiFi válida (SSID vacío o por defecto)."));
+        #endif
+    } else {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[MainSetup] Configuración WiFi encontrada. Intentando conectar..."));
+        #endif
+        wifiSuccess = initializeWiFi_Sys(wifiManager, led, config, api_comm, sdManager, timeManager, camera);
+    }
+
+    if (wifiSuccess) {
+
+    // If WiFi connected successfully, proceed with normal operation. AP mode is already handled above.
+    #ifdef ENABLE_DEBUG_SERIAL
+        Serial.println(F("[MainSetup] Conexión exitosa. Iniciando Modo Operación Normal (STA)."));
+    #endif
+    isInConfigMode = false;
+    led.setState(ALL_OK); 
+
+    webPortal.beginSTAMode(); 
 
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("[MainSetup] Executing robust NTP startup..."));
@@ -174,11 +200,11 @@ void setup() {
         handleSensorInitFailure_Sys();
     }
     
-    String setupCompleteMsg = "Device setup completed. Initial Time: " + timeManager.getCurrentTimestampString();
+    String setupCompleteMsg = "Device setup completed (STA Mode). Initial Time: " + timeManager.getCurrentTimestampString();
     if (api_comm && api_comm->isActivated()){
-         ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), LOG_TYPE_INFO, setupCompleteMsg, NAN);
+        ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), LOG_TYPE_INFO, setupCompleteMsg, NAN);
     } else {
-         ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::INFO, setupCompleteMsg, NAN);
+        ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::INFO, setupCompleteMsg, NAN);
     }
 
     #ifdef ENABLE_DEBUG_SERIAL
@@ -186,6 +212,20 @@ void setup() {
         Serial.println(setupCompleteMsg);
         Serial.println(F("--------------------------------------"));
     #endif
+    } else {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[MainSetup] Conexión fallida o sin config. Iniciando Modo Configuración (AP)."));
+        #endif
+        isInConfigMode = true;
+        led.setState(CONFIG_MODE_AP); 
+        
+        webPortal.beginAPMode(); 
+        
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(F("[MainSetup] Setup complete (AP Mode). Esperando configuración..."));
+            Serial.println(F("--------------------------------------"));
+        #endif
+    }
 }
 
 //=========================================================================
@@ -193,187 +233,192 @@ void setup() {
 // =========================================================================
 void loop() {
 
-    // --- 1. Quick, continuous checks (runs on every single loop pass) ---
-    float internalTemp = dsInternalSensor.readTemperature();
+    if (isInConfigMode) {
 
-    // --- 2. Timing Gate: Check if it's time to run the data collection cycle ---
-    time_t currentTime = timeManager.getCurrentEpochTime();
-    if (currentTime < nextDataCollectionEpochTime) {
-        delay(1000); 
-        return; // Not time yet, restart loop.
-    }
+        webPortal.processDns();
+        led.setState(CONFIG_MODE_AP);
 
-    // --- 3. It's time to run: Execute the full data collection and maintenance cycle ---
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println(F("\n[MainLoop] >>> Starting Data Collection Cycle <<<"));
-    #endif
+    } else {
 
-    ledBlink_Ctrl(led);
-    led.setState(ALL_OK);
-    
-    // --- 3A. Backend & Auth Check with new granular logic ---
-    bool proceedWithDataCollection = false; // Default to not proceeding until a valid state is confirmed.
+        // --- 1. Quick, continuous checks (runs on every single loop pass) ---
+        float internalTemp = dsInternalSensor.readTemperature();
 
-    for (int attempt = 1; attempt <= AUTH_MAX_RETRIES; ++attempt) {
-        int resultCode = 0;
+        // --- 2. Timing Gate: Check if it's time to run the data collection cycle ---
+        time_t currentTime = timeManager.getCurrentEpochTime();
+        if (currentTime >= nextDataCollectionEpochTime) {
 
-        if (!api_comm->isActivated()) {
-            // Activation is a critical preliminary step. If this fails, we can't proceed.
+            // --- 3. It's time to run: Execute the full data collection and maintenance cycle ---
             #ifdef ENABLE_DEBUG_SERIAL
-                Serial.printf("[MainLoop] Device not activated. Attempting activation (%d/%d)...\n", attempt, AUTH_MAX_RETRIES);
+                Serial.println(F("\n[MainLoop] >>> Starting Data Collection Cycle <<<"));
             #endif
-            if (handleApiAuthenticationAndActivation_Ctrl(sdManager, timeManager, config, *api_comm, led, internalTemp)) {
-                proceedWithDataCollection = true; // Activation successful!
-                break;
-            }
-        } else {
-            // Device is activated, so we can perform the standard auth check.
-            resultCode = api_comm->checkBackendAndAuth();
+
+            ledBlink_Ctrl(led);
+            led.setState(ALL_OK);
             
-            if (resultCode >= 200 && resultCode < 300) {
-                proceedWithDataCollection = true; // Success!
-                break;
+            // --- 3A. Backend & Auth Check with new granular logic ---
+            bool proceedWithDataCollection = false; // Default to not proceeding until a valid state is confirmed.
+
+            for (int attempt = 1; attempt <= AUTH_MAX_RETRIES; ++attempt) {
+                int resultCode = 0;
+
+                if (!api_comm->isActivated()) {
+                    // Activation is a critical preliminary step. If this fails, we can't proceed.
+                    #ifdef ENABLE_DEBUG_SERIAL
+                        Serial.printf("[MainLoop] Device not activated. Attempting activation (%d/%d)...\n", attempt, AUTH_MAX_RETRIES);
+                    #endif
+                    if (handleApiAuthenticationAndActivation_Ctrl(sdManager, timeManager, config, *api_comm, led, internalTemp)) {
+                        proceedWithDataCollection = true; // Activation successful!
+                        break;
+                    }
+                } else {
+                    // Device is activated, so we can perform the standard auth check.
+                    resultCode = api_comm->checkBackendAndAuth();
+                    
+                    if (resultCode >= 200 && resultCode < 300) {
+                        proceedWithDataCollection = true; // Success!
+                        break;
+                    }
+
+                    if (resultCode >= 500 || resultCode < 0) { // Server is down or unreachable.
+                        #ifdef ENABLE_DEBUG_SERIAL
+                            Serial.println("[MainLoop] Backend appears offline. Proceeding to collect data for pending queue.");
+                        #endif
+                        proceedWithDataCollection = true; // Per new logic, we proceed anyway.
+                        break; // Don't retry if server is down, just break and continue the cycle.
+                    }
+                    
+                    // Any other error (likely 4xx) is a critical auth failure that requires retrying.
+                    #ifdef ENABLE_DEBUG_SERIAL
+                        Serial.printf("[MainLoop] Auth check failed with client-side error (Code: %d). Retrying (%d/%d)...\n", resultCode, attempt, AUTH_MAX_RETRIES);
+                    #endif
+                }
+
+                // If we are here, it means a critical auth/activation error occurred, and we should retry.
+                if (attempt < AUTH_MAX_RETRIES) {
+                    delay(AUTH_RETRY_DELAY_MS);
+                }
             }
 
-            if (resultCode >= 500 || resultCode < 0) { // Server is down or unreachable.
+            // --- 3B. Execute or Skip Cycle based on Auth Check ---
+            if (!proceedWithDataCollection) {
+                // This only happens if activation or a critical auth check (like 4xx) fails all retries.
                 #ifdef ENABLE_DEBUG_SERIAL
-                    Serial.println("[MainLoop] Backend appears offline. Proceeding to collect data for pending queue.");
+                    Serial.println(F("[MainLoop] CRITICAL: Cannot authenticate or activate. Skipping cycle and retrying later."));
                 #endif
-                proceedWithDataCollection = true; // Per new logic, we proceed anyway.
-                break; // Don't retry if server is down, just break and continue the cycle.
+                ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::ERROR, "Critical Auth/Activation failed. Cycle skipped.");
+                led.setState(ERROR_AUTH);
+                
+                // Schedule next attempt after the standard interval
+                unsigned long intervalMinutes = api_comm->getDataCollectionTimeMinutes() > 0 ? api_comm->getDataCollectionTimeMinutes() : config.data_interval_minutes;
+                nextDataCollectionEpochTime = timeManager.getCurrentEpochTime() + (intervalMinutes * 60);
+                return; // Skip the rest of this cycle.
             }
             
-            // Any other error (likely 4xx) is a critical auth failure that requires retrying.
+            // --- 3C. Data Capture ---
+            float lightLevel = lightSensor.readLightLevel();
+
             #ifdef ENABLE_DEBUG_SERIAL
-                Serial.printf("[MainLoop] Auth check failed with client-side error (Code: %d). Retrying (%d/%d)...\n", resultCode, attempt, AUTH_MAX_RETRIES);
+                Serial.printf("[MainLoop] Current Time: %s\n", timeManager.getCurrentTimestampString().c_str());
+            #endif
+
+            bool cycleStatusOK = true;
+
+            // perform...Tasks functions will internally handle failed sends by saving to pending.
+            if (!performEnvironmentTasks_Env(sdManager, timeManager, config, *api_comm, lightSensor, bmeExternalSensor, led, internalTemp)) {
+                cycleStatusOK = false;
+            }
+            
+            uint8_t* localJpegImage = nullptr;
+            size_t localJpegLength = 0;
+            float* localThermalData = nullptr;
+            if (cycleStatusOK) {
+                if (!performImageTasks_Img(sdManager, timeManager, config, *api_comm, camera, thermalSensor, led, lightLevel, &localJpegImage, localJpegLength, &localThermalData, internalTemp)) {
+                    cycleStatusOK = false;
+                }
+            }
+            
+            // --- 3D. End-of-Cycle Signaling & Cleanup ---
+            const char* logType = cycleStatusOK ? LOG_TYPE_INFO : LOG_TYPE_WARNING;
+            String logMessage = cycleStatusOK ? "Main data cycle completed successfully." : "Main data cycle completed with errors.";
+            ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), logType, logMessage, internalTemp);
+            
+            ledBlink_Ctrl(led);
+            led.setState(OFF);
+
+            // --- 3E. Maintenance Tasks ---
+            cleanupImageBuffers_Ctrl(localJpegImage, localThermalData);
+
+            if (wifiManager.getConnectionStatus() == WiFiManager::CONNECTED) {
+                sdManager.processPendingApiCalls(*api_comm, timeManager, config, internalTemp);
+            }
+            
+            if (sdManager.isSDAvailable()) {
+                sdManager.manageAllStorage(timeManager); 
+                
+                uint64_t sdUsed, sdTotal;
+                float usagePercent = sdManager.getUsageInfo(sdUsed, sdTotal);
+                if (usagePercent >= 90.0f && !sdUsageWarning90PercentSent) {
+                    String msg = "CRITICAL WARNING: SD Card usage is at " + String(usagePercent, 1) + "%";
+                    ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), LOG_TYPE_WARNING, msg, internalTemp);
+                    sdUsageWarning90PercentSent = true;
+                } else if (usagePercent < 85.0f && sdUsageWarning90PercentSent) {
+                    String msg = "INFO: SD Card usage is now " + String(usagePercent, 1) + "%. Warning resolved.";
+                    ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), LOG_TYPE_INFO, msg, internalTemp);
+                    sdUsageWarning90PercentSent = false;
+                }
+            }
+
+            // --- 3F. NTP Sync Check ---
+            time_t currentTimeForSyncCheck = timeManager.getCurrentEpochTime();
+            
+            // Check if more than 1 hour has passed since the last NTP sync check
+            if ((currentTimeForSyncCheck - lastNtpSyncEpochTime) > 3600) {
+                if (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET) {
+                    #ifdef ENABLE_DEBUG_SERIAL
+                        Serial.println(F("[TimeManager] WARNING: NTP sync has been lost! Attempting to re-initialize..."));
+                    #endif
+                    led.setState(ERROR_TIMER);
+                    initializeNTP_Sys(timeManager, sdManager, api_comm, config, COLOMBIA_GMT_OFFSET_SEC, COLOMBIA_DAYLIGHT_OFFSET_SEC);
+
+                } else {
+                    #ifdef ENABLE_DEBUG_SERIAL
+                        Serial.println(F("[TimeManager] Periodic NTP check: Sync status is OK."));
+                    #endif
+                }
+
+                lastNtpSyncEpochTime = timeManager.getCurrentEpochTime();
+            }
+
+            
+            // --- 4. Schedule the NEXT data collection cycle ---
+            unsigned long intervalMinutes = api_comm->getDataCollectionTimeMinutes();
+            if (intervalMinutes == 0) {
+                intervalMinutes = config.data_interval_minutes;
+            }
+
+            time_t lastRunTime = timeManager.getCurrentEpochTime(); 
+            struct tm timeinfo;
+            localtime_r(&lastRunTime, &timeinfo);
+
+            int minutes_past_slot = timeinfo.tm_min % intervalMinutes;
+            int minutes_to_add = (minutes_past_slot == 0) ? intervalMinutes : (intervalMinutes - minutes_past_slot);
+            
+            time_t next_run_base_time = lastRunTime + (minutes_to_add * 60);
+
+            localtime_r(&next_run_base_time, &timeinfo);
+            timeinfo.tm_sec = 0;
+            nextDataCollectionEpochTime = mktime(&timeinfo);
+            
+            if (nextDataCollectionEpochTime <= lastRunTime) {
+                nextDataCollectionEpochTime += (intervalMinutes * 60);
+            }
+
+            #ifdef ENABLE_DEBUG_SERIAL
+                char time_buf[50];
+                localtime_r(&nextDataCollectionEpochTime, &timeinfo);
+                strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
+                Serial.printf("[MainLoop] <<< Cycle Complete >>> Next run scheduled for: %s\n\n", time_buf);
             #endif
         }
-
-        // If we are here, it means a critical auth/activation error occurred, and we should retry.
-        if (attempt < AUTH_MAX_RETRIES) {
-            delay(AUTH_RETRY_DELAY_MS);
-        }
     }
-
-    // --- 3B. Execute or Skip Cycle based on Auth Check ---
-    if (!proceedWithDataCollection) {
-        // This only happens if activation or a critical auth check (like 4xx) fails all retries.
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[MainLoop] CRITICAL: Cannot authenticate or activate. Skipping cycle and retrying later."));
-        #endif
-        ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::ERROR, "Critical Auth/Activation failed. Cycle skipped.");
-        led.setState(ERROR_AUTH);
-        
-        // Schedule next attempt after the standard interval
-        unsigned long intervalMinutes = api_comm->getDataCollectionTimeMinutes() > 0 ? api_comm->getDataCollectionTimeMinutes() : config.data_interval_minutes;
-        nextDataCollectionEpochTime = timeManager.getCurrentEpochTime() + (intervalMinutes * 60);
-        return; // Skip the rest of this cycle.
-    }
-    
-    // --- 3C. Data Capture ---
-    float lightLevel = lightSensor.readLightLevel();
-
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.printf("[MainLoop] Current Time: %s\n", timeManager.getCurrentTimestampString().c_str());
-    #endif
-
-    bool cycleStatusOK = true;
-
-    // perform...Tasks functions will internally handle failed sends by saving to pending.
-    if (!performEnvironmentTasks_Env(sdManager, timeManager, config, *api_comm, lightSensor, bmeExternalSensor, led, internalTemp)) {
-        cycleStatusOK = false;
-    }
-    
-    uint8_t* localJpegImage = nullptr;
-    size_t localJpegLength = 0;
-    float* localThermalData = nullptr;
-    if (cycleStatusOK) {
-        if (!performImageTasks_Img(sdManager, timeManager, config, *api_comm, camera, thermalSensor, led, lightLevel, &localJpegImage, localJpegLength, &localThermalData, internalTemp)) {
-            cycleStatusOK = false;
-        }
-    }
-    
-    // --- 3D. End-of-Cycle Signaling & Cleanup ---
-    const char* logType = cycleStatusOK ? LOG_TYPE_INFO : LOG_TYPE_WARNING;
-    String logMessage = cycleStatusOK ? "Main data cycle completed successfully." : "Main data cycle completed with errors.";
-    ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), logType, logMessage, internalTemp);
-    
-    ledBlink_Ctrl(led);
-    led.setState(OFF);
-
-    // --- 3E. Maintenance Tasks ---
-    cleanupImageBuffers_Ctrl(localJpegImage, localThermalData);
-
-    if (wifiManager.getConnectionStatus() == WiFiManager::CONNECTED) {
-        sdManager.processPendingApiCalls(*api_comm, timeManager, config, internalTemp);
-    }
-    
-    if (sdManager.isSDAvailable()) {
-        sdManager.manageAllStorage(timeManager); 
-        
-        uint64_t sdUsed, sdTotal;
-        float usagePercent = sdManager.getUsageInfo(sdUsed, sdTotal);
-        if (usagePercent >= 90.0f && !sdUsageWarning90PercentSent) {
-            String msg = "CRITICAL WARNING: SD Card usage is at " + String(usagePercent, 1) + "%";
-            ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), LOG_TYPE_WARNING, msg, internalTemp);
-            sdUsageWarning90PercentSent = true;
-        } else if (usagePercent < 85.0f && sdUsageWarning90PercentSent) {
-            String msg = "INFO: SD Card usage is now " + String(usagePercent, 1) + "%. Warning resolved.";
-            ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), LOG_TYPE_INFO, msg, internalTemp);
-            sdUsageWarning90PercentSent = false;
-        }
-    }
-
-    // --- 3F. NTP Sync Check ---
-    time_t currentTimeForSyncCheck = timeManager.getCurrentEpochTime();
-    
-    // Check if more than 1 hour has passed since the last NTP sync check
-    if ((currentTimeForSyncCheck - lastNtpSyncEpochTime) > 3600) {
-        if (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET) {
-            #ifdef ENABLE_DEBUG_SERIAL
-                Serial.println(F("[TimeManager] WARNING: NTP sync has been lost! Attempting to re-initialize..."));
-            #endif
-            led.setState(ERROR_TIMER);
-            initializeNTP_Sys(timeManager, sdManager, api_comm, config, COLOMBIA_GMT_OFFSET_SEC, COLOMBIA_DAYLIGHT_OFFSET_SEC);
-
-        } else {
-            #ifdef ENABLE_DEBUG_SERIAL
-                Serial.println(F("[TimeManager] Periodic NTP check: Sync status is OK."));
-            #endif
-        }
-
-        lastNtpSyncEpochTime = timeManager.getCurrentEpochTime();
-    }
-
-    
-    // --- 4. Schedule the NEXT data collection cycle ---
-    unsigned long intervalMinutes = api_comm->getDataCollectionTimeMinutes();
-    if (intervalMinutes == 0) {
-        intervalMinutes = config.data_interval_minutes;
-    }
-
-    time_t lastRunTime = timeManager.getCurrentEpochTime(); 
-    struct tm timeinfo;
-    localtime_r(&lastRunTime, &timeinfo);
-
-    int minutes_past_slot = timeinfo.tm_min % intervalMinutes;
-    int minutes_to_add = (minutes_past_slot == 0) ? intervalMinutes : (intervalMinutes - minutes_past_slot);
-    
-    time_t next_run_base_time = lastRunTime + (minutes_to_add * 60);
-
-    localtime_r(&next_run_base_time, &timeinfo);
-    timeinfo.tm_sec = 0;
-    nextDataCollectionEpochTime = mktime(&timeinfo);
-    
-    if (nextDataCollectionEpochTime <= lastRunTime) {
-        nextDataCollectionEpochTime += (intervalMinutes * 60);
-    }
-
-    #ifdef ENABLE_DEBUG_SERIAL
-        char time_buf[50];
-        localtime_r(&nextDataCollectionEpochTime, &timeinfo);
-        strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
-        Serial.printf("[MainLoop] <<< Cycle Complete >>> Next run scheduled for: %s\n\n", time_buf);
-    #endif
 }
-

@@ -43,4 +43,11 @@ bool initFilesystem();
  */
 void loadConfigurationFromFile();
 
+/** @brief Guarda un string JSON como el nuevo archivo de configuración.
+ * Sobrescribe el /config.json existente.
+ * @param jsonString El string de configuración en formato JSON.
+ * @return True si se guardó correctamente, false si falló la escritura.
+ */
+bool saveConfiguration(const String& jsonString);
+
 #endif // CONFIG_MANAGER_H
