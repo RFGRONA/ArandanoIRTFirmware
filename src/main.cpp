@@ -110,6 +110,7 @@ void setup() {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[MainSetup] CRITICAL: LittleFS init failed. Halting."));
         #endif
+        ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::ERROR, "CRITICAL: LittleFS init failed. Halting.");
         while(1) { delay(1000); }
     }
     loadConfigurationFromFile(); 
@@ -122,6 +123,7 @@ void setup() {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[MainSetup] CRITICAL: SD Card init failed. Halting."));
         #endif
+        ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::ERROR, "CRITICAL: SD Card init failed. Halting.");
         while(1) { delay(1000); } 
     }
     
@@ -141,18 +143,18 @@ void setup() {
 
     // --- WiFi Connection & Web Portal Setup ---
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println(F("[MainSetup] Iniciando lógica de conexión y portal..."));
+        Serial.println(F("[WebPortal] Initiating connection logic and portal..."));
     #endif
 
     bool wifiSuccess = false;
     
     if (config.wifi_ssid.length() == 0 || config.wifi_ssid == "DEFAULT_SSID") {
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[MainSetup] No hay configuración WiFi válida (SSID vacío o por defecto)."));
+            Serial.println(F("[WifiConfig] No valid WiFi configuration (empty or default SSID)."));
         #endif
     } else {
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[MainSetup] Configuración WiFi encontrada. Intentando conectar..."));
+            Serial.println(F("[WifiConfig] WiFi settings found. Attempting to connect..."));
         #endif
         wifiSuccess = initializeWiFi_Sys(wifiManager, led, config, api_comm, sdManager, timeManager, camera);
     }
@@ -161,7 +163,7 @@ void setup() {
 
     // If WiFi connected successfully, proceed with normal operation. AP mode is already handled above.
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println(F("[MainSetup] Conexión exitosa. Iniciando Modo Operación Normal (STA)."));
+        Serial.println(F("[WebPortal] Connection successful. Starting Normal Operating Mode (STA)."));
     #endif
     isInConfigMode = false;
     led.setState(ALL_OK); 
@@ -177,6 +179,7 @@ void setup() {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[MainSetup] CRITICAL: NTP init failed. Halting."));
         #endif
+        ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::ERROR, "CRITICAL: NTP init failed. Halting.");
         delay(ERROR_RESTART_DELAY_MS); 
         ESP.restart();
     }
@@ -194,13 +197,20 @@ void setup() {
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("[MainSetup] Initializing external sensors..."));
     #endif
-    if (!initializeSensors_Sys(bmeExternalSensor, lightSensor, thermalSensor, camera)) { 
-        ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::ERROR, "External sensor init failed in setup.");
+
+    String failedSensors = initializeSensors_Sys(bmeExternalSensor, lightSensor, thermalSensor, camera);
+
+    if (!failedSensors.isEmpty()) { 
+        
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println(("[MainSetup] FATAL ERROR: External sensor initialization failed[" + failedSensors + "]. Halting."));
+        #endif   
         led.setState(ERROR_SENSOR);
-        handleSensorInitFailure_Sys();
+        handleSensorInitFailure_Sys(sdManager, timeManager, failedSensors);
     }
     
     String setupCompleteMsg = "Device setup completed (STA Mode). Initial Time: " + timeManager.getCurrentTimestampString();
+    ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::INFO, "WiFi connected. Starting Normal Operation (STA Mode).");
     if (api_comm && api_comm->isActivated()){
         ErrorLogger::sendLog(sdManager, timeManager, api_comm->getBaseApiUrl() + config.apiLogPath, api_comm->getAccessToken(), LOG_TYPE_INFO, setupCompleteMsg, NAN);
     } else {
@@ -214,15 +224,16 @@ void setup() {
     #endif
     } else {
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[MainSetup] Conexión fallida o sin config. Iniciando Modo Configuración (AP)."));
+            Serial.println(F("[WebPortal] Connection failed or no configuration. Starting Configuration Mode (AP)."));
         #endif
+        ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::INFO, "WiFi failed or no config. Starting Configuration (AP Mode).");
         isInConfigMode = true;
         led.setState(CONFIG_MODE_AP); 
         
         webPortal.beginAPMode(); 
         
         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[MainSetup] Setup complete (AP Mode). Esperando configuración..."));
+            Serial.println(F("[MainSetup] Setup complete (AP Mode). Waiting for configuration..."));
             Serial.println(F("--------------------------------------"));
         #endif
     }
@@ -283,6 +294,7 @@ void loop() {
                         #ifdef ENABLE_DEBUG_SERIAL
                             Serial.println("[MainLoop] Backend appears offline. Proceeding to collect data for pending queue.");
                         #endif
+                        ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::WARNING, "Backend offline (Code: " + String(resultCode) + "). Proceeding with queue.");
                         proceedWithDataCollection = true; // Per new logic, we proceed anyway.
                         break; // Don't retry if server is down, just break and continue the cycle.
                     }
@@ -291,6 +303,8 @@ void loop() {
                     #ifdef ENABLE_DEBUG_SERIAL
                         Serial.printf("[MainLoop] Auth check failed with client-side error (Code: %d). Retrying (%d/%d)...\n", resultCode, attempt, AUTH_MAX_RETRIES);
                     #endif
+                    String authErrMsg = "Auth check failed (Code: " + String(resultCode) + "). Retrying (" + String(attempt) + "/" + String(AUTH_MAX_RETRIES) + ").";
+                    ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::ERROR, authErrMsg);
                 }
 
                 // If we are here, it means a critical auth/activation error occurred, and we should retry.
@@ -349,6 +363,7 @@ void loop() {
             cleanupImageBuffers_Ctrl(localJpegImage, localThermalData);
 
             if (wifiManager.getConnectionStatus() == WiFiManager::CONNECTED) {
+                ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::INFO, "Processing pending API call queue...");
                 sdManager.processPendingApiCalls(*api_comm, timeManager, config, internalTemp);
             }
             
@@ -377,6 +392,7 @@ void loop() {
                     #ifdef ENABLE_DEBUG_SERIAL
                         Serial.println(F("[TimeManager] WARNING: NTP sync has been lost! Attempting to re-initialize..."));
                     #endif
+                    ErrorLogger::logToSdOnly(sdManager, timeManager, LogLevel::WARNING, "NTP sync lost during operation. Attempting re-sync.");
                     led.setState(ERROR_TIMER);
                     initializeNTP_Sys(timeManager, sdManager, api_comm, config, COLOMBIA_GMT_OFFSET_SEC, COLOMBIA_DAYLIGHT_OFFSET_SEC);
 

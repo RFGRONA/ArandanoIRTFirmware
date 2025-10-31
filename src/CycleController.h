@@ -1,9 +1,17 @@
-// src/CycleController.h
+/**
+ * @file CycleController.h
+ * @brief Define un conjunto de funciones auxiliares (helpers) que
+ * gestionan la lógica principal del ciclo de la aplicación.
+ *
+ * Estas funciones son llamadas desde el 'main.cpp' para organizar
+ * las tareas del bucle principal (loop), como la conexión WiFi,
+ * la autenticación API y la limpieza de memoria.
+ */
 #ifndef CYCLE_CONTROLLER_H
 #define CYCLE_CONTROLLER_H
 
 #include <Arduino.h>
-// Include headers for types used in parameters
+// Headers de tipos usados en los parámetros
 #include "ConfigManager.h"  
 #include "WiFiManager.h"   
 #include "API.h"           
@@ -12,41 +20,50 @@
 #include "SDManager.h" 
 #include "TimeManager.h"
 
-// --- Function Prototypes for CycleController ---
+// --- Prototipos de Funciones del Controlador de Ciclo ---
 
 /**
- * @brief Ensures WiFi is connected, using WiFiManager.
- * This function might become redundant if main.cpp directly calls wifiManager.handleWiFi()
- * and then checks status before calling ensureWiFiConnected_Ctrl.
- * For now, it mirrors the blocking ensureWiFiConnected from your original main.
- * @param wifiMgr The WiFiManager instance.
- * @param sysLed Reference to LEDStatus for status indication.
- * @param timeoutMs Timeout in milliseconds for connection.
- * @return True if connected.
+ * @brief Asegura que el WiFi esté conectado (función bloqueante con timeout).
+ *
+ * Esta función replica la lógica de 'ensureWiFiConnected' del main.cpp original.
+ * Llama a `wifiMgr.handleWiFi()` internamente mientras espera la conexión.
+ *
+ * @param wifiMgr Referencia al WiFiManager.
+ * @param sysLed Referencia al LEDStatus para indicación visual.
+ * @param timeoutMs Timeout máximo en milisegundos para esperar la conexión.
+ * @return true si se conectó exitosamente, false si falló o hubo timeout.
  */
 bool ensureWiFiConnected_Ctrl(WiFiManager& wifiMgr, LEDStatus& sysLed, unsigned long timeoutMs);
 
 /**
- * @brief Performs a simple visual blink sequence using the status LED.
- * @param sysLed Reference to LEDStatus.
+ * @brief Realiza una secuencia simple de parpadeo (blink) con el LED de estado.
+ * @param sysLed Referencia al LEDStatus.
  */
 void ledBlink_Ctrl(LEDStatus& sysLed);
 
-/** @brief Handles API authentication and activation, including token refresh.
- * @param sdMgr Reference to the SDManager for persistent storage.
- * @param timeMgr Reference to the TimeManager for time synchronization.
- * @param cfg A reference to the global Config structure.
- * @param api_obj A reference to the API object.
- * @param status_led A reference to the LEDStatus object.
- * @param internalTempForLog Internal temperature to include in logs.
- * @return true if the device is activated, authenticated, and ready.
+/**
+ * @brief Gestiona la autenticación y activación completa contra la API.
+ *
+ * Maneja la activación del dispositivo (si es necesaria) y la
+ * verificación/refresco de los tokens de autenticación.
+ *
+ * @param sdMgr Referencia al SDManager (para logs).
+ * @param timeMgr Referencia al TimeManager (para logs).
+ * @param cfg Referencia a la Configuración global.
+ * @param api_obj Referencia al objeto API.
+ * @param status_led Referencia al LEDStatus.
+ * @param internalTempForLog Temperatura interna para incluir en los logs.
+ * @return true si el dispositivo está activado, autenticado y listo para operar.
  */
 bool handleApiAuthenticationAndActivation_Ctrl(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, LEDStatus& status_led, float internalTempForLog);
 
-/** @brief Frees allocated memory buffers for JPEG image and thermal data.
- * Does NOT deinitialize the camera.
- * @param jpegImage Pointer to the JPEG image buffer (will be freed).
- * @param thermalData Pointer to the thermal data buffer (will be freed).
+/**
+ * @brief Libera los buffers de memoria (alojados con malloc/ps_malloc)
+ * de la imagen JPEG y los datos térmicos.
+ *
+ * @note Esta función *NO* desinicializa la cámara.
+ * @param jpegImage Puntero al buffer de la imagen JPEG (será liberado).
+ * @param thermalData Puntero al buffer de datos térmicos (será liberado).
  */
 void cleanupImageBuffers_Ctrl(uint8_t* jpegImage, float* thermalData);
 

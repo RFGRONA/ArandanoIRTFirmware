@@ -1,35 +1,38 @@
 /**
  * @file EnvironmentDataJSON.h
- * @brief Defines a utility class to format and send environmental sensor data
- * as JSON via HTTP POST requests.
+ * @brief Define una clase de utilidad para formatear y enviar datos
+ * de sensores ambientales como JSON vía HTTP POST.
  */
 #ifndef ENVIRONMENT_DATA_JSON_H
 #define ENVIRONMENT_DATA_JSON_H
 
-#include <ArduinoJson.h> // Required for JSON formatting (using ArduinoJson v6+)
-#include <HTTPClient.h>  // Required for making HTTP requests on ESP32
+#include <ArduinoJson.h> // Requerido para formatear JSON (v6+)
+#include <HTTPClient.h>  // Requerido para peticiones HTTP en ESP32
 
 /**
  * @class EnvironmentDataJSON
- * @brief Utility class containing a static method for sending environmental data.
+ * @brief Clase de utilidad (utility) que contiene un método estático
+ * para construir y enviar los datos ambientales.
  */
 class EnvironmentDataJSON {
 public:
     /**
-     * @brief Constructs a JSON payload and sends environmental data to an API via HTTP POST.
+     * @brief Construye un JSON y envía datos ambientales a una API vía HTTP POST.
      *
-     * This static method takes environmental sensor readings, formats them into a JSON object:
-     * `{"light": value, "temperature": value, "humidity": value, "pressure": value}`,
-     * and sends this JSON payload as the body of an HTTP POST request.
+     * Este método estático toma las lecturas de los sensores, las formatea
+     * en un objeto JSON y envía este JSON como el cuerpo de una petición POST.
      *
-     * @param fullEnvDataUrl The complete URL (String) of the API endpoint.
-     * @param accessToken The access token (String) for Authorization header.
-     * @param timestamp The time of capture in ISO 8601 format (String).
-     * @param lightLevel The ambient light level reading (float, lux).
-     * @param temperature The temperature reading (float, °C).
-     * @param humidity The relative humidity reading (float, %).
-     * @param pressure The barometric pressure reading (float, hPa). 
-     * @return The HTTP status code returned by the server.
+     * @param fullEnvDataUrl URL completa (String) del endpoint de la API.
+     * @param accessToken Token de acceso (String) para la cabecera 'Authorization'.
+     * @param timestamp Hora de captura en formato ISO 8601 (String).
+     * @param lightLevel Nivel de luz ambiental (float, lux).
+     * @param temperature Temperatura (float, °C).
+     * @param humidity Humedad relativa (float, %).
+     * @param pressure Presión barométrica (float, hPa).
+     *
+     * @return El código de estado HTTP devuelto por el servidor (ej. 200, 401, 500).
+     * Retorna un valor negativo si ocurre un error en el cliente
+     * (ej. -1 URL vacía, -2 sin WiFi, -5 fallo de conexión).
      */
     static int IOEnvironmentData(
         const String& fullEnvDataUrl,

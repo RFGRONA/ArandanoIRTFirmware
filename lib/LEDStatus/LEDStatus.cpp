@@ -1,52 +1,51 @@
 /**
  * @file LEDStatus.cpp
- * @brief Implements the LEDStatus class for controlling a WS2812 NeoPixel status LED.
+ * @brief Implementa la clase LEDStatus para controlar el LED de estado (WS2812).
  */
 #include "LEDStatus.h"
 
-// --- Hardware Configuration ---
-#define LED_PIN 48   ///< GPIO pin where the WS2812 NeoPixel data line is connected.
-#define NUMPIXELS 1  ///< Number of NeoPixels controlled by this instance (should be 1).
+// --- Configuración Hardware ---
+#define LED_PIN 48   ///< Pin GPIO donde se conecta la línea de datos del NeoPixel.
+#define NUMPIXELS 1  ///< Número de NeoPixels (debe ser 1 para esta clase).
 // ----------------------------
 
 /**
- * @brief Constructor implementation.
- * Initializes the Adafruit_NeoPixel object and sets the initial LED state to OFF.
+ * @brief Implementación del constructor.
+ * Configura el objeto NeoPixel usando la lista de inicialización
+ * y establece el estado interno inicial en OFF.
  */
 LEDStatus::LEDStatus() : 
     pixels(NUMPIXELS, LED_PIN, NEO_GRB + NEO_KHZ800),
-    _currentState(OFF) // Initialize current state to OFF
+    _currentState(OFF) // Inicializa el estado interno
     {
-    // The Adafruit_NeoPixel object is configured via the initializer list above.
+    // (Vacío intencionalmente)
 }
 
 /**
- * @brief Initializes the NeoPixel library communication.
- * Clears any previous color data and sends the 'off' state to the pixel.
+ * @brief Inicializa la comunicación de la librería NeoPixel.
+ * Prepara la librería y se asegura que el LED esté físicamente apagado.
  */
 void LEDStatus::begin() {
-    pixels.begin();       // Initialize Adafruit_NeoPixel library internals.
-    pixels.clear();       // Set pixel data buffer to 'off' (0,0,0).
-    pixels.show();        // Transmit the buffer data to the physical pixel.
-    _currentState = OFF;  // Ensure internal state matches physical state
-    delay(50);            // Short delay after initialization (optional, can be adjusted/removed).
+    pixels.begin();       // Inicializa la librería
+    pixels.clear();       // Establece el buffer a (0,0,0)
+    pixels.show();        // Envía el estado 'apagado' al píxel
+    _currentState = OFF;  // Sincroniza el estado interno
+    delay(50);            // Pausa corta post-inicialización (opcional).
 }
 
 /**
- * @brief Turns the LED off.
- * Sets the LED to OFF state and updates the physical LED.
+ * @brief Apaga el LED.
+ * Establece el estado en OFF y actualiza el píxel físico.
  */
 void LEDStatus::turnOffAll() {
-    pixels.clear(); // Set pixel data buffer to 'off'.
-    pixels.show();  // Transmit the update to the pixel.
+    pixels.clear(); // Pone el buffer a (0,0,0)
+    pixels.show();  // Envía el estado 'apagado'
     _currentState = OFF;
 }
 
 /**
- * @brief Internal helper function to set the color of the LED.
- * @param r Red component (0-255).
- * @param g Green component (0-255).
- * @param b Blue component (0-255).
+ * @brief Función interna (helper) para establecer el color del LED.
+ * Actualiza el buffer del píxel y lo envía (show).
  */
 void LEDStatus::setColor(uint8_t r, uint8_t g, uint8_t b) {
     pixels.setPixelColor(0, pixels.Color(r, g, b));
@@ -54,74 +53,63 @@ void LEDStatus::setColor(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 /**
- * @brief Sets the LED to a specific state and color.
- * Updates the internal current state.
- * @param state The desired LEDState.
+ * @brief Establece el LED a un estado (y color) específico.
+ * Actualiza el estado interno y cambia el color físico del LED.
+ * @param state El estado deseado (LEDState).
  */
 void LEDStatus::setState(LEDState state) {
-    _currentState = state; // Update the current state
+    _currentState = state; // Actualiza el estado interno
 
     switch(state) {
-        case ERROR_AUTH:      // Authentication error state
-            setColor(255, 0, 0);   // Red
+        case ERROR_AUTH:
+            setColor(255, 0, 0);   // Rojo
             break;
-        case ERROR_SEND:      // Data transmission error state
-            setColor(255, 165, 0); // Orange 
+        case ERROR_SEND:
+            setColor(255, 165, 0); // Naranja 
             break;
-        case ERROR_SENSOR:    // Sensor read/init error state
-            setColor(255, 0, 255); // Purple/Magenta
+        case ERROR_SENSOR:
+            setColor(255, 0, 255); // Púrpura/Magenta
             break;
-        case ERROR_DATA:      // Data processing/capture error state
-            setColor(0, 255, 255); // Cyan
+        case ERROR_DATA:
+            setColor(0, 255, 255); // Cian
             break;
-        case TAKING_DATA:     // Actively taking measurements/capture state
-            setColor(0, 0, 255);   // Blue
+        case TAKING_DATA:
+            setColor(0, 0, 255);   // Azul
             break;
-        case SENDING_DATA:    // Actively sending data state
-            setColor(0, 255, 0);   // Green
+        case SENDING_DATA:
+            setColor(0, 255, 0);   // Verde
             break;
-        case ALL_OK:          // Idle / OK state
-            setColor(255, 255, 255); // White 
+        case ALL_OK:
+            setColor(255, 255, 255); // Blanco 
             break;
-        case OFF:             // Explicitly off state
+        case OFF:
             pixels.clear();
             pixels.show();
             break;
-        case CONNECTING_WIFI: // Attempting WiFi connection state
-             setColor(255, 223, 0); // Yellow 
+        case CONNECTING_WIFI:
+             setColor(255, 223, 0); // Amarillo 
             break;
-        case ERROR_WIFI:      // WiFi connection failed state
-             setColor(255, 105, 180); // Pink
+        case ERROR_WIFI:
+             setColor(255, 105, 180); // Rosa
             break;
-        case ERROR_TIMER:  // Internal temperature high, fans are ON
-            setColor(139, 0, 0);   // Dark Red 
+        case ERROR_TIMER: // (Error en sincronización NTP)
+            setColor(139, 0, 0);   // Rojo Oscuro 
             break;
-        case CONFIG_MODE_AP:  // In Access Point Configuration Mode
-            setColor(0, 128, 128); // Teal (Green + Blue)
+        case CONFIG_MODE_AP:
+            setColor(0, 128, 128); // Teal (Verde-Azul)
             break;
-        default:              // Handle any undefined or future states
+        default: // Maneja estados indefinidos (apaga el LED)
             pixels.clear();
             pixels.show();
-            _currentState = OFF; // Ensure a defined state for default
+            _currentState = OFF; // Asegura un estado interno definido
             break;
     }
 }
 
 /**
- * @brief Retrieves the current logical state of the LED.
- * @return The current state from the `LEDState` enum.
+ * @brief Obtiene el estado lógico actual del LED.
+ * @return El estado actual (del enum `LEDState`).
  */
 LEDState LEDStatus::getCurrentState() const { 
     return _currentState;
 }
-
-
-// Other colors:
-// - Crimson Red / Dark Red (139, 0, 0 or 180, 0, 0)
-// - Dark Amber / Reddish Brown (139, 69, 19) - May be less visible or mistaken for Orange if the brightness is low.
-// - Indigo (75, 0, 130) - A very dark blue, almost purple, but different from Pure Blue and Bright Purple.
-// - Turquoise / Light Blue (64, 224, 208) - A lighter blue than Pure Blue, but not as bright as Lime Green.
-// - Lime Green / Chartreuse (127, 255, 0) - A brighter green than Pure Green, but less saturated.
-// - Dark Orange (255, 140, 0) - A darker orange than the default Orange (255, 165, 0).
-// - Light Blue (173, 216, 230) - A very light blue, almost pastel, which can be used for a more subtle indication.
-// - Lighter and darker colors can be tested.

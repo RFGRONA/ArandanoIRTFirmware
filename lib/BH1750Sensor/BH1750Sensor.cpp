@@ -1,30 +1,24 @@
 /**
  * @file BH1750Sensor.cpp
- * @brief Implements the BH1750Sensor wrapper class methods.
+ * @brief Implementación de los métodos de la clase BH1750Sensor.
  */
 #include "BH1750Sensor.h"
 
-// Constructor implementation - Initializes member variables.
-// Stores the reference to the I2C bus and the pin numbers for reference.
-// The BH1750 object 'lightMeter' is implicitly default-constructed here.
+// El constructor utiliza la lista de inicialización para guardar la referencia
+// al bus I2C y los pines. El cuerpo está vacío intencionalmente.
 BH1750Sensor::BH1750Sensor(TwoWire &wire, int sda, int scl)
   : _wire(wire), _sda(sda), _scl(scl) {
-    // Nothing more needed in the constructor body itself.
-    // Initialization happens in the begin() method.
+    // La inicialización real del hardware ocurre en el método begin().
 }
 
-// Initializes the sensor using the underlying library's begin method.
-// Passes the specific I2C bus instance (_wire) to the library.
 bool BH1750Sensor::begin() {
-  // Attempts to initialize the light meter in Continuous High Res Mode 2,
-  // with the default I2C address 0x23, using the provided TwoWire instance.
-  // The return value indicates success (true) or failure (false).
+  // Inicializa el sensor usando la librería base.
+  // Se especifica el modo, la dirección I2C (0x23) y la instancia del bus I2C.
   return lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE_2, 0x23, &_wire);
 }
 
-// Reads the light level by calling the underlying library's method.
-// Returns the value directly. Error conditions (e.g., negative values like -1 or -2)
-// indicating read failure are handled by the BH1750 library itself.
 float BH1750Sensor::readLightLevel() {
+  // Simplemente llama al método de la librería base y retorna su valor.
+  // La librería BH1750 maneja internamente los códigos de error (valores negativos).
   return lightMeter.readLightLevel();
 }

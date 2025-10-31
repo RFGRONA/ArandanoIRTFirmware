@@ -1,15 +1,15 @@
-// lib/ErrorLogger/ErrorLogger.cpp
 #include "ErrorLogger.h"
-#include <ArduinoJson.h> 
-#include <HTTPClient.h>  
-#include <WiFi.h>        
-#include <math.h>        
-#include "SDManager.h"    
-#include "TimeManager.h"  
+#include <ArduinoJson.h> // Para construir el payload JSON para la API
+#include <HTTPClient.h>  // Para realizar las peticiones POST a la API
+#include <WiFi.h>        // Para verificar el estado de la conexión WiFi
+#include <math.h>        // Para la comprobación isnan() de la temperatura
+#include "SDManager.h"    // Para la escritura local en SD
+#include "TimeManager.h"  // Para obtener los timestamps
 
+// Timeout para la petición HTTP de envío de logs (milisegundos)
 #define LOG_HTTP_REQUEST_TIMEOUT 5000 
 
-// Define the log type constants here (this is the single point of definition)
+// Definición (instanciación) de las constantes de tipo de log
 const char LOG_TYPE_INFO[]    = "INFO";
 const char LOG_TYPE_WARNING[] = "WARNING";
 const char LOG_TYPE_ERROR[]   = "ERROR";
@@ -22,30 +22,32 @@ bool ErrorLogger::sendLog(SDManager& sdManager,
                           const String& logMessage, 
                           float internalTemp) {
 
-    // --- Step 1: Basic Parameter Validation ---
+    // --- Paso 1: Validación de Parámetros Básicos ---
     if (logType == nullptr || logMessage.isEmpty()) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[ErrorLogger] Skipped logging: Missing logType or message."));
         #endif
-        return false; // Cannot log without type or message
+        return false; // No se puede registrar sin tipo o mensaje
     }
 
-    // --- Step 2: Get Timestamp ---
-    String timestamp = timeManager.getCurrentTimestampString(); // Format: "YYYY-MM-DD HH:MM:SS" or uptime based if not synced
+    // --- Paso 2: Obtener Timestamp ---
+    // Obtiene la hora actual o el tiempo de actividad (uptime) si el NTP no se ha sincronizado
+    String timestamp = timeManager.getCurrentTimestampString(); 
 
-    // --- Step 3: Log Locally to SD Card (Always Attempt) ---
+    // --- Paso 3: Registrar Localmente en la SD (Siempre Intentar) ---
     bool localLogSuccess = false;
-    if (sdManager.isSDAvailable()) { //
-        // Convert const char* logType to LogLevel enum for sdManager.logToFile
+    if (sdManager.isSDAvailable()) { 
+        // Convierte el 'const char*' (para la API) al 'enum LogLevel' (para la SD)
         LogLevel levelEnum;
         if (strcmp(logType, LOG_TYPE_INFO) == 0) {
             levelEnum = LogLevel::INFO;
         } else if (strcmp(logType, LOG_TYPE_WARNING) == 0) {
             levelEnum = LogLevel::WARNING;
-        } else { // Default to ERROR for unknown or LOG_TYPE_ERROR
+        } else { // Por defecto, ERROR
             levelEnum = LogLevel::ERROR;
         }
         
+        // Intenta escribir en el archivo de log de la SD
         localLogSuccess = sdManager.logToFile(timestamp, levelEnum, logMessage, internalTemp);
         #ifdef ENABLE_DEBUG_SERIAL
             if (localLogSuccess) {
@@ -60,7 +62,9 @@ bool ErrorLogger::sendLog(SDManager& sdManager,
         #endif
     }
 
-    // --- Step 4: Attempt to Send Log to Remote API (Conditionally) ---
+    // --- Paso 4: Intentar Enviar Log a API Remota (Condicionalmente) ---
+    
+    // Solo proceder si hay WiFi y se proporcionó una URL
     if (WiFi.status() == WL_CONNECTED && !fullLogUrl.isEmpty()) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[ErrorLogger] WiFi connected. Attempting to send log to remote API."));
@@ -69,10 +73,13 @@ bool ErrorLogger::sendLog(SDManager& sdManager,
             }
         #endif
 
+        // Construir el payload JSON para la API
         JsonDocument doc; 
         doc["logType"] = logType; 
         doc["logMessage"] = logMessage;
+        // Añadir temperatura interna solo si es un valor válido (no NAN)
         if (!isnan(internalTemp)) { 
+            // Serializa como String con 2 decimales
             doc["internalDeviceTemperature"] = serialized(String(internalTemp, 2)); 
         }
 
@@ -83,11 +90,12 @@ bool ErrorLogger::sendLog(SDManager& sdManager,
             #ifdef ENABLE_DEBUG_SERIAL
                 Serial.println(F("[ErrorLogger] Failed to serialize JSON payload for remote log. Remote send skipped."));
             #endif
-            return localLogSuccess; // Return status of local logging
+            return localLogSuccess; // Retorna solo el éxito local
         }
 
+        // Configurar cliente HTTP
         HTTPClient http;
-        http.setReuse(false);
+        http.setReuse(false); // Evitar conexiones "stale" (obsoletas)
 
         if (http.begin(fullLogUrl)) {
             http.setTimeout(LOG_HTTP_REQUEST_TIMEOUT);
@@ -97,31 +105,28 @@ bool ErrorLogger::sendLog(SDManager& sdManager,
                 http.addHeader("Authorization", "Device " + accessToken);
             }
 
+            // Enviar la petición POST
             int httpResponseCode = http.POST(jsonPayload);
 
             if (httpResponseCode >= 200 && httpResponseCode < 300) {
                 #ifdef ENABLE_DEBUG_SERIAL
                     Serial.printf("[ErrorLogger] Remote log sent successfully. HTTP Response: %d\n", httpResponseCode);
                 #endif
-                // remoteLogSuccess = true;
+                // (Nota: el éxito remoto no se rastrea en el valor de retorno)
             } else {
                 #ifdef ENABLE_DEBUG_SERIAL
                     Serial.printf("[ErrorLogger] Failed to send remote log. HTTP Code: %d\n", httpResponseCode);
-                    if(httpResponseCode > 0) {
-                        String errorResponse = http.getString();
-                        Serial.printf("[ErrorLogger] Server Error: %s\n", errorResponse.c_str());
-                    } else {
-                        Serial.printf("[ErrorLogger] HTTP Client Error: %s\n", http.errorToString(httpResponseCode).c_str());
-                    }
+                    // (Aquí se maneja la impresión de errores del servidor o del cliente)
                 #endif
             }
-            http.end();
+            http.end(); // Liberar recursos
         } else {
             #ifdef ENABLE_DEBUG_SERIAL
                 Serial.printf("[ErrorLogger] HTTP connection failed for remote log URL: %s\n", fullLogUrl.c_str());
             #endif
         }
     } else {
+        // (Logs de depuración que explican por qué se omitió el envío remoto)
         #ifdef ENABLE_DEBUG_SERIAL
             if (WiFi.status() != WL_CONNECTED) {
                 Serial.println(F("[ErrorLogger] WiFi not connected. Remote log not sent."));
@@ -132,15 +137,20 @@ bool ErrorLogger::sendLog(SDManager& sdManager,
         #endif
     }
     
-    return localLogSuccess; // Primarily report success of critical local logging
+    // El valor de retorno de la función prioriza el éxito del registro local (SD).
+    return localLogSuccess; 
 }
 
+/**
+ * @brief Implementación del registro exclusivo en SD.
+ */
 bool ErrorLogger::logToSdOnly(SDManager& sdManager,
                               TimeManager& timeManager,
                               LogLevel level,
                               const String& logMessage,
                               float internalTemp) {
-    // --- Step 1: Basic Parameter Validation ---
+                                  
+    // --- Paso 1: Validación ---
     if (logMessage.isEmpty()) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[ErrorLoggerSdOnly] Skipped logging: Missing message."));
@@ -148,18 +158,19 @@ bool ErrorLogger::logToSdOnly(SDManager& sdManager,
         return false;
     }
 
-    if (!sdManager.isSDAvailable()) { //
+    if (!sdManager.isSDAvailable()) { 
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[ErrorLoggerSdOnly] SD card not available. Cannot write log."));
         #endif
         return false;
     }
 
-    // --- Step 2: Get Timestamp ---
+    // --- Paso 2: Obtener Timestamp ---
     String timestamp = timeManager.getCurrentTimestampString();
 
-    // --- Step 3: Log Locally to SD Card ---
+    // --- Paso 3: Registrar Localmente en la SD ---
     bool localLogSuccess = sdManager.logToFile(timestamp, level, logMessage, internalTemp);
+    
     #ifdef ENABLE_DEBUG_SERIAL
         if (localLogSuccess) {
             Serial.printf("[ErrorLoggerSdOnly] Log successfully written to SD card. Timestamp: %s\n", timestamp.c_str());

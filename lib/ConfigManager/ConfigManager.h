@@ -1,11 +1,14 @@
-// src/ConfigManager.h
 #ifndef CONFIG_MANAGER_H
 #define CONFIG_MANAGER_H
 
 #include <Arduino.h> 
-// --- Configuration Structure ---
+
+// --- Estructura de Configuración ---
 /**
- * @brief Holds application configuration parameters loaded from LittleFS or default values.
+ * @brief Almacena todos los parámetros de configuración de la aplicación.
+ *
+ * @note Estos valores actúan como valores por defecto si el archivo
+ * /config.json no existe o una clave específica falta en él.
  */
 struct Config {
     String wifi_ssid = "DEFAULT_SSID";
@@ -22,30 +25,35 @@ struct Config {
     int data_interval_minutes = 30;
 };
 
-extern Config config; // Declare 'config' as an external global variable
+// Declara la instancia *global* 'config'.
+// Esta variable será *definida* (creada) en el archivo ConfigManager.cpp
+// y será accesible desde cualquier otro archivo que incluya este .h.
+extern Config config; 
 
-// --- Function Prototypes for ConfigManager ---
-/** @brief Loads configuration from LittleFS into the global 'config' struct.
- * @param filename The name of the configuration file.
- * @return True if configuration loaded successfully, false otherwise.
- */
-bool loadConfiguration(const char *filename);
+// --- Prototipos de Funciones del ConfigManager ---
 
-/** @brief Initializes and mounts the LittleFS filesystem, formatting if necessary.
- * @param statusLed Pointer to an LEDStatus object to indicate errors. Can be nullptr if no LED feedback is needed here.
- * @return True if filesystem is successfully mounted.
+/** * @brief Inicializa y monta el sistema de archivos LittleFS.
+ * Intenta montar. Si falla, intenta formatear el sistema de archivos
+ * y montarlo de nuevo.
+ * @return True si el sistema de archivos está montado y listo.
  */
 bool initFilesystem(); 
 
-/** @brief Loads configuration from the default config file.
- * This is a convenience wrapper around loadConfiguration().
- * It does NOT set WiFi credentials directly in WiFiManager.
+/** * @brief Carga la configuración desde un archivo JSON a la struct global 'config'.
+ * @param filename El nombre (ruta) del archivo de configuración en LittleFS.
+ * @return True si la carga fue exitosa, false si falló (ej. archivo no existe, JSON inválido).
+ */
+bool loadConfiguration(const char *filename);
+
+/** * @brief Wrapper (atajo) para cargar el archivo de configuración por defecto.
+ * Llama a loadConfiguration() con la ruta definida en CONFIG_FILENAME.
+ * Si falla, la struct 'config' simplemente mantendrá sus valores por defecto.
  */
 void loadConfigurationFromFile();
 
-/** @brief Guarda un string JSON como el nuevo archivo de configuración.
- * Sobrescribe el /config.json existente.
- * @param jsonString El string de configuración en formato JSON.
+/** * @brief Guarda un string JSON en el archivo de configuración.
+ * Sobrescribe completamente el archivo /config.json existente.
+ * @param jsonString El string de configuración en formato JSON válido.
  * @return True si se guardó correctamente, false si falló la escritura.
  */
 bool saveConfiguration(const String& jsonString);

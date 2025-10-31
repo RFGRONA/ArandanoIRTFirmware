@@ -1,89 +1,86 @@
 /**
  * @file LEDStatus.h
- * @brief Manages a single WS2812 NeoPixel LED for status indication.
+ * @brief Gestiona un LED NeoPixel (WS2812) individual para indicación de estado.
  *
- * Provides methods to initialize the LED and set its color based on
- * predefined operational states. Assumes a single NeoPixel connected
- * to a specific pin. Uses the Adafruit NeoPixel library.
+ * Proporciona métodos para inicializar el LED y establecer su color
+ * basándose en estados operativos predefinidos.
+ * Asume un único NeoPixel conectado. Usa la librería Adafruit_NeoPixel.
  */
 #ifndef LEDSTATUS_H
 #define LEDSTATUS_H
 
-#include <Adafruit_NeoPixel.h> // Required for NeoPixel control
-#include <Arduino.h>           // Required for basic types like uint8_t
+#include <Adafruit_NeoPixel.h> 
+#include <Arduino.h>           
 
 /**
- * @brief Defines the possible operational states the system can indicate via the LED color.
- *
- * Each state corresponds to a specific color defined in the implementation (.cpp file).
+ * @brief Define los posibles estados operativos que el sistema
+ * puede indicar a través del color del LED.
  */
 enum LEDState {
-    ALL_OK,          ///< State: Everything OK / Idle. Color: White.
-    OFF,             ///< State: LED explicitly turned off. Color: Off.
-    ERROR_AUTH,      ///< State: Authentication error occurred. Color: Red.
-    ERROR_SEND,      ///< State: Error sending data via HTTP. Color: Orange.
-    ERROR_SENSOR,    ///< State: Error initializing or reading a sensor. Color: Purple.
-    ERROR_DATA,      ///< State: Error processing or capturing data (e.g., image). Color: Cyan.
-    TAKING_DATA,     ///< State: Currently performing measurements or capture. Color: Blue.
-    SENDING_DATA,    ///< State: Currently sending data via HTTP. Color: Green.
-    CONNECTING_WIFI, ///< State: Attempting to connect to WiFi network. Color: Yellow.
-    ERROR_WIFI,      ///< State: Failed to connect to WiFi network. Color: Pink.
-    ERROR_TIMER,     ///< State: Failed to sinchronize time. Color: Dark Orange/Amber.
-    CONFIG_MODE_AP  ///< State: In configuration mode (Access Point). Color: Teal (Cyan-Green).
+    ALL_OK,          ///< Estado: Todo OK / Inactivo. Color: Blanco.
+    OFF,             ///< Estado: LED explícitamente apagado. Color: Apagado.
+    ERROR_AUTH,      ///< Estado: Error de autenticación. Color: Rojo.
+    ERROR_SEND,      ///< Estado: Error enviando datos (HTTP). Color: Naranja.
+    ERROR_SENSOR,    ///< Estado: Error al leer/inicializar sensor. Color: Púrpura.
+    ERROR_DATA,      ///< Estado: Error procesando/capturando datos (ej. imagen). Color: Cian.
+    TAKING_DATA,     ///< Estado: Tomando mediciones o captura. Color: Azul.
+    SENDING_DATA,    ///< Estado: Enviando datos (HTTP). Color: Verde.
+    CONNECTING_WIFI, ///< Estado: Intentando conectar a WiFi. Color: Amarillo.
+    ERROR_WIFI,      ///< Estado: Fallo al conectar a WiFi. Color: Rosa.
+    ERROR_TIMER,     ///< Estado: Fallo al sincronizar hora (NTP). Color: Rojo Oscuro.
+    CONFIG_MODE_AP   ///< Estado: Modo configuración (Access Point). Color: Teal (Verde-azul).
 };
 
 /**
  * @class LEDStatus
- * @brief Manages a single WS2812 NeoPixel for displaying system status via colors.
+ * @brief Gestiona un único NeoPixel (WS2812) para mostrar el estado del sistema.
  *
- * This class encapsulates the Adafruit_NeoPixel library for controlling one pixel.
- * It maps logical system states (defined in `LEDState`) to specific colors.
+ * Encapsula la librería Adafruit_NeoPixel y mapea los estados lógicos
+ * (definidos en `LEDState`) a colores específicos.
  */
 class LEDStatus {
 public:
     /**
-     * @brief Constructor for LEDStatus.
-     * Initializes the NeoPixel library instance with parameters defined in the .cpp file
-     * (pin number, number of pixels, pixel type).
+     * @brief Constructor.
+     * Inicializa la instancia de la librería NeoPixel con los parámetros
+     * definidos en el .cpp (pin, número de píxeles, tipo).
      */
     LEDStatus();
 
     /**
-     * @brief Initializes the NeoPixel LED hardware communication.
-     * Sets up the pixel library and ensures the LED is turned off initially.
-     * This method should be called once in the `setup()` function of the sketch.
+     * @brief Inicializa la comunicación hardware con el NeoPixel.
+     * Configura la librería y asegura que el LED inicie apagado.
+     * Debe llamarse una vez en la función `setup()`.
      */
     void begin();
 
     /**
-     * @brief Sets the LED color based on the specified system state.
-     * Looks up the color associated with the given state and updates the LED.
-     * @param state The desired state from the `LEDState` enum.
+     * @brief Establece el color del LED según el estado del sistema especificado.
+     * @param state El estado deseado (del enum `LEDState`).
      */
     void setState(LEDState state);
 
     /**
-     * @brief Turns the NeoPixel LED completely off.
-     * Equivalent to calling `setState(OFF)`.
+     * @brief Apaga completamente el LED.
+     * Equivalente a llamar `setState(OFF)`.
      */
     void turnOffAll();
 
     /**
-     * @brief Retrieves the current logical state of the LED.
-     * @return The current state from the `LEDState` enum.
+     * @brief Obtiene el estado lógico actual del LED.
+     * @return El estado actual (del enum `LEDState`).
      */
     LEDState getCurrentState() const; 
 
 private:
-    Adafruit_NeoPixel pixels; ///< @brief Instance of the Adafruit NeoPixel library.
-    LEDState _currentState;   ///< @brief Stores the current logical state of the LED. 
+    Adafruit_NeoPixel pixels; ///< Instancia de la librería Adafruit NeoPixel.
+    LEDState _currentState;   ///< Almacena el estado lógico (LEDState) actual. 
 
     /**
-     * @brief Sets the raw RGB color of the NeoPixel LED.
-     * This is a low-level helper function used by `setState`.
-     * @param r Red component (0-255).
-     * @param g Green component (0-255).
-     * @param b Blue component (0-255).
+     * @brief Función interna (helper) para establecer el color RGB crudo del LED.
+     * @param r Componente Rojo (0-255).
+     * @param g Componente Verde (0-255).
+     * @param b Componente Azul (0-255).
      */
     void setColor(uint8_t r, uint8_t g, uint8_t b);
 };

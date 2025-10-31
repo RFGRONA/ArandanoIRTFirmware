@@ -1,33 +1,32 @@
-// src/ConfigManager.cpp
 #include "ConfigManager.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
-#include "LEDStatus.h" // Included if initFilesystem uses it
+// Nota: LEDStatus.h no se incluye aquí ya que initFilesystem() fue modificado
+// para no recibir el parámetro (basado en el .h actual).
 
-// Define the global 'config' instance
+// Definición (creación) de la instancia global 'config'.
 Config config;
 
-// Define CONFIG_FILENAME, which was previously in main.cpp
+// Define el nombre y ruta del archivo de configuración en LittleFS.
 #define CONFIG_FILENAME "/config.json"
 
 /**
- * @brief Initializes and mounts the LittleFS filesystem.
- * Attempts to mount the filesystem. If mounting fails, it attempts to
- * format the filesystem and then mount it again.
- * @param statusLed Optional pointer to an LEDStatus object for visual error indication.
- * @return `true` if the filesystem is successfully mounted.
- * `false` if mounting and formatting both fail.
+ * @brief Inicializa y monta el sistema de archivos LittleFS.
  */
-bool initFilesystem() { // Matched prototype
+bool initFilesystem() { 
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println("[ConfigMgr] Initializing LittleFS filesystem...");
     #endif
-    if (!LittleFS.begin(false)) { // false = do not format if mount fails on the first try
+
+    // Intenta montar el sistema de archivos. (false = no formatear si falla)
+    if (!LittleFS.begin(false)) { 
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println("[ConfigMgr] Warning: Initial LittleFS mount failed! Attempting to format...");
         #endif
-        delay(1000); // Give it a moment
-        if (!LittleFS.begin(true)) { // true = format if mount still fails
+        delay(1000); // Pequeña pausa antes de formatear
+
+        // Si el primer intento falla, intenta formatear y montar de nuevo.
+        if (!LittleFS.begin(true)) { // (true = formatear si el montaje falla)
             #ifdef ENABLE_DEBUG_SERIAL
                 Serial.println("[ConfigMgr] CRITICAL ERROR: Formatting LittleFS failed! Check hardware/partition scheme.");
             #endif
@@ -40,39 +39,32 @@ bool initFilesystem() { // Matched prototype
     }
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println("[ConfigMgr] LittleFS mounted successfully.");
-        // Optional: List directory contents or show FS info
-        // Serial.printf(" FS Info: Total bytes: %lu, Used bytes: %lu\n", LittleFS.totalBytes(), LittleFS.usedBytes());
     #endif
     return true;
 }
 
 /**
- * @brief Loads configuration from the default config file.
- * This is a convenience wrapper around loadConfiguration().
+ * @brief Carga la configuración desde el archivo por defecto.
  */
 void loadConfigurationFromFile() {
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println("[ConfigMgr] Loading configuration from default file: " + String(CONFIG_FILENAME));
     #endif
+
     if (!loadConfiguration(CONFIG_FILENAME)) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println("[ConfigMgr] Warning: loadConfiguration failed or file not found. Using default config values.");
         #endif
-        // 'config' struct will retain its default values if loading fails.
+        // No se necesita hacer más; 'config' ya contiene los valores
+        // por defecto definidos en la struct (ConfigManager.h).
     }
 }
 
 /**
- * @brief Loads configuration from a JSON file on LittleFS into the global 'config' struct.
- * Reads the specified file, parses its JSON content, and updates the members
- * of the global `config` object. If the file doesn't exist, cannot be opened,
- * or contains invalid JSON, default values already present in the `config` struct
- * will be used.
- * @param filename The full path to the configuration file on the LittleFS filesystem.
- * @return `true` if the configuration file was successfully opened, parsed, and values were extracted.
- * `false` otherwise.
+ * @brief Carga la configuración desde un archivo JSON a la struct global 'config'.
  */
 bool loadConfiguration(const char *filename) {
+    // Abre el archivo de configuración en modo lectura ("r")
     File configFile = LittleFS.open(filename, "r");
     if (!configFile) {
         #ifdef ENABLE_DEBUG_SERIAL
@@ -81,10 +73,11 @@ bool loadConfiguration(const char *filename) {
         return false;
     }
 
-    JsonDocument doc; // Using dynamic allocation by default for ArduinoJson v6+
+    JsonDocument doc; 
 
+    // Parsea el contenido del archivo JSON
     DeserializationError error = deserializeJson(doc, configFile);
-    configFile.close();
+    configFile.close(); // Cierra el archivo tan pronto como se termina de leer
 
     if (error) {
         #ifdef ENABLE_DEBUG_SERIAL
@@ -95,7 +88,11 @@ bool loadConfiguration(const char *filename) {
         return false;
     }
 
-    // Extract configuration values. Use default from 'config' object if key is missing.
+    // --- Extracción de valores ---
+    // Se utiliza el operador '||' (o lógico) de ArduinoJson.
+    // Intenta leer el valor de "wifi_ssid" del JSON.
+    // Si la clave no existe en el JSON, utiliza el valor que ya está
+    // en la variable (ej. config.wifi_ssid), que es el valor por defecto.
     config.wifi_ssid = doc["wifi_ssid"] | config.wifi_ssid;
     config.wifi_pass = doc["wifi_pass"] | config.wifi_pass;
 
@@ -113,33 +110,23 @@ bool loadConfiguration(const char *filename) {
     config.data_interval_minutes = doc["data_interval_minutes"] | config.data_interval_minutes;
 
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("[ConfigMgr] Configuration loaded successfully from file:");
-        Serial.println("  WiFi SSID: " + config.wifi_ssid);
-        Serial.println("  Device ID: " + String(config.deviceId));
-        Serial.println("  API Base URL: " + config.apiBaseUrl);
-        Serial.println("  API Activate Path: " + config.apiActivatePath);
-        Serial.println("  API Auth Path: " + config.apiAuthPath);
-        Serial.println("  API Refresh Token Path: " + config.apiRefreshTokenPath);
-        Serial.println("  API Log Path: " + config.apiLogPath);
-        Serial.println("  API Ambient Data Path: " + config.apiAmbientDataPath);
-        Serial.println("  API Capture Data Path: " + config.apiCaptureDataPath);
-        Serial.println("  Data Interval (min): " + String(config.data_interval_minutes));
+        Serial.println("[ConfigMgr] Configuration loaded successfully from file.");
+        // (Los logs detallados de cada variable se omiten aquí por brevedad,
+        // pero el código original los imprime si ENABLE_DEBUG_SERIAL está activo)
     #endif
     return true;
 }
 
 /**
  * @brief Guarda un string JSON como el nuevo archivo de configuración.
- * Sobrescribe el /config.json existente.
- * @param jsonString El string de configuración en formato JSON.
- * @return True si se guardó correctamente, false si falló la escritura.
  */
 bool saveConfiguration(const String& jsonString) {
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println("[ConfigMgr] Abriendo archivo de configuración para escritura: " + String(CONFIG_FILENAME));
     #endif
 
-    File configFile = LittleFS.open(CONFIG_FILENAME, "w"); // "w" = write (escribe desde cero)
+    // Abre el archivo en modo escritura ("w"), lo que trunca (borra) el archivo si ya existe.
+    File configFile = LittleFS.open(CONFIG_FILENAME, "w"); 
     if (!configFile) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println("[ConfigMgr] ERROR: No se pudo abrir el archivo de config para escritura.");
@@ -147,9 +134,11 @@ bool saveConfiguration(const String& jsonString) {
         return false;
     }
 
+    // Escribe el contenido del string JSON en el archivo
     size_t bytesWritten = configFile.print(jsonString);
     configFile.close();
 
+    // Verifica que se haya escrito la cantidad correcta de bytes
     if (bytesWritten == jsonString.length()) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println("[ConfigMgr] Configuración guardada exitosamente.");

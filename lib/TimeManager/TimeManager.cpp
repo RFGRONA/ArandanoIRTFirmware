@@ -1,9 +1,9 @@
-// lib/TimeManager/TimeManager.cpp
 #include "TimeManager.h"
-#include <WiFi.h> // To check WiFi status before attempting NTP sync
+#include <WiFi.h> // Para verificar el estado de WiFi (WiFi.status())
 
-#define NTP_PER_SERVER_TIMEOUT_MS 15000 // 15 seconds per server
-#define NTP_FINAL_WAIT_MS 5000 // 5 seconds after last server timeout
+// Timeouts para la función 'getLocalTime' (bloqueante)
+#define NTP_PER_SERVER_TIMEOUT_MS 15000 // 15 segundos por servidor
+#define NTP_FINAL_WAIT_MS 5000 // 5 segundos después del último timeout
 
 TimeManager::TimeManager() : 
     _timeSynchronized(false),
@@ -11,33 +11,33 @@ TimeManager::TimeManager() :
     _ntpServer2(DEFAULT_NTP_SERVER_2),
     _gmtOffset_sec(0),
     _daylightOffset_sec(0) {
-    // Constructor
+    // Constructor (usa lista de inicialización)
 }
 
 void TimeManager::begin(const String& ntpServer1, const String& ntpServer2, long gmtOffset_sec, int daylightOffset_sec) {
+    // Guarda la configuración
     _ntpServer1 = ntpServer1;
     _ntpServer2 = ntpServer2;
     _gmtOffset_sec = gmtOffset_sec;
     _daylightOffset_sec = daylightOffset_sec;
 
-    // configTime is an ESP-IDF function that configures NTP.
-    // It starts the SNTP service.
-    // Parameters: gmtOffset_sec, daylightOffset_sec, server1, server2, (optional server3)
+    // Llama a la función de ESP-IDF 'configTime' que configura e inicia
+    // el servicio SNTP (Simple Network Time Protocol) en segundo plano.
     configTime(_gmtOffset_sec, _daylightOffset_sec, _ntpServer1.c_str(), _ntpServer2.c_str());
     
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.printf("[TimeManager] Initialized with NTP Servers: %s, %s. GMT Offset: %ld, DST Offset: %d\n",
                       _ntpServer1.c_str(), _ntpServer2.c_str(), _gmtOffset_sec, _daylightOffset_sec);
     #endif
-    // Initial sync attempt can be called from main setup after WiFi connection
 }
 
 bool TimeManager::syncNtpTime() {
+    // Pre-condición: Se necesita WiFi para sincronizar.
     if (WiFi.status() != WL_CONNECTED) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println("[TimeManager] NTP Sync failed: WiFi not connected.");
         #endif
-        _timeSynchronized = false; // Mark as not synced if WiFi is down
+        _timeSynchronized = false; // Marca como no sincronizado si se cae el WiFi
         return false;
     }
 
@@ -45,14 +45,15 @@ bool TimeManager::syncNtpTime() {
         Serial.print("[TimeManager] Attempting NTP time synchronization");
     #endif
 
-    // configTime should have already been called in begin().
-    // Here we just check if time is available.
-    // The getLocalTime function will block until time is obtained or timeout (default is about 15 seconds per server).
+    // 'getLocalTime' es una función bloqueante de ESP-IDF.
+    // Esperará hasta obtener la hora o hasta que se cumpla el timeout interno.
     
     struct tm timeinfo;
     int retries = 0;
-    while(!getLocalTime(&timeinfo, (NTP_SYNC_MAX_RETRIES * NTP_PER_SERVER_TIMEOUT_MS) + NTP_FINAL_WAIT_MS)) { // Max wait slightly more than all retries on default timeouts
-                                                                          // Or manage retries manually if getLocalTime is non-blocking enough
+    
+    // Intentamos obtener la hora. Si falla, reintentamos (hasta NTP_SYNC_MAX_RETRIES).
+    // El timeout total es una aproximación de los reintentos * timeouts internos.
+    while(!getLocalTime(&timeinfo, (NTP_SYNC_MAX_RETRIES * NTP_PER_SERVER_TIMEOUT_MS) + NTP_FINAL_WAIT_MS)) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.print(".");
         #endif
@@ -62,12 +63,11 @@ bool TimeManager::syncNtpTime() {
             #ifdef ENABLE_DEBUG_SERIAL
                 Serial.println("\n[TimeManager] Failed to obtain NTP time after multiple retries.");
             #endif
-            // _timeSynchronized remains false or is set to false explicitly
-            // No need to call configTime again here unless changing servers
             _timeSynchronized = false; 
             return false;
         }
-        // If WiFi disconnects during attempts, exit
+        
+        // Aborta si se pierde el WiFi durante el intento
         if (WiFi.status() != WL_CONNECTED) {
             #ifdef ENABLE_DEBUG_SERIAL
                  Serial.println("\n[TimeManager] NTP Sync aborted: WiFi disconnected during sync attempt.");
@@ -77,30 +77,31 @@ bool TimeManager::syncNtpTime() {
         }
     }
     
+    // Sincronización exitosa
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println("\n[TimeManager] NTP Time synchronized successfully.");
-        Serial.printf("[TimeManager] Current time: %s", asctime(&timeinfo)); // asctime adds a newline
+        Serial.printf("[TimeManager] Current time: %s", asctime(&timeinfo)); // asctime añade \n
     #endif
     _timeSynchronized = true;
     return true;
 }
 
 String TimeManager::getCurrentTimestampString(bool forFileNames) {
+    // Fallback: Si no hay NTP, retorna un timestamp basado en millis() (tiempo de actividad).
     if (!_timeSynchronized) {
-        // Fallback: Use millis() for a relative timestamp if NTP is not synced
-        // This indicates that the timestamp is not from a real-time clock.
         unsigned long ms = millis();
         unsigned long s = ms / 1000;
         unsigned long m = s / 60;
         unsigned long h = m / 60;
-        // Format: UPTIME_HHhMMmSSs (Uptime based)
+        // Formato: UPTIME_HHhMMmSSs
         char buf[30];
         sprintf(buf, "UPTIME_%02luh%02lum%02lus", h % 24, m % 60, s % 60);
         return String(buf);
     }
 
+    // Obtiene la estructura 'tm' (debería ser instantáneo si ya está sincronizado).
     struct tm timeinfo;
-    if (!getLocalTime(&timeinfo)) { // Should return quickly if already synced
+    if (!getLocalTime(&timeinfo)) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println("[TimeManager] Failed to get local time structure even after sync.");
         #endif
@@ -109,10 +110,10 @@ String TimeManager::getCurrentTimestampString(bool forFileNames) {
 
     char buf[32];
     if (forFileNames) {
-        // Format: YYYYMMDD_HHMMSS
+        // Formato para nombres de archivo: YYYYMMDD_HHMMSS
         strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &timeinfo);
     } else {
-        // Format: YYYY-MM-DD HH:MM:SS
+        // Formato estándar (ISO 8601 Local): YYYY-MM-DDTHH:MM:SS
         strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &timeinfo);
     }
     return String(buf);
@@ -120,14 +121,15 @@ String TimeManager::getCurrentTimestampString(bool forFileNames) {
 
 time_t TimeManager::getCurrentEpochTime() {
     if (!_timeSynchronized) {
-        return 0; // Return 0 or some indicator of unsynced time
+        return 0; // Retorna 0 si no está sincronizado
     }
     time_t now;
-    time(&now); // Gets current calendar time as time_t object (seconds since epoch)
-    // 'now' will be based on the ESP32's internal RTC, which should have been set by configTime/NTP.
+    // Obtiene el tiempo (epoch) del RTC interno del ESP32 (ajustado por NTP).
+    time(&now); 
     return now;
 }
 
 bool TimeManager::isTimeSynced() const {
+    // Retorna el estado del flag de sincronización.
     return _timeSynchronized;
 }
