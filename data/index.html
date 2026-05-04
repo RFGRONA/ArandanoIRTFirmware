@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configuración ArandanoIR</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <main>
+        <h1>Configuración del Dispositivo</h1>
+        <p>Completa la configuración para conectar el dispositivo a la red.</p>
+        
+        <form id="config-form">
+            <fieldset>
+                <legend>Conexión WiFi</legend>
+                <div class="form-group">
+                    <label for="wifi_ssid">Nombre de Red (SSID)</label>
+                    <input type="text" id="wifi_ssid" name="wifi_ssid" required>
+                </div>
+                <div class="form-group">
+                    <label for="wifi_pass">Contraseña de Red</label>
+                    <input type="password" id="wifi_pass" name="wifi_pass" placeholder="Dejar en blanco si es abierta">
+                </div>
+            </fieldset>
+
+            <fieldset>
+                <legend>Identificación y API</legend>
+                <div class="form-group">
+                    <label for="deviceId">ID del Dispositivo</label>
+                    <input type="number" id="deviceId" name="deviceId" required>
+                </div>
+                <div class="form-group">
+                    <label for="activationCode">Código de Activación</label>
+                    <input type="text" id="activationCode" name="activationCode">
+                </div>
+                <div class="form-group">
+                    <label for="apiBaseUrl">URL Base de la API</label>
+                    <input type="text" id="apiBaseUrl" name="apiBaseUrl" placeholder="Ej. https://api.ejemplo.com">
+                </div>
+            </fieldset>
+            
+            <details>
+                <summary>Configuración Avanzada de API</summary>
+                <fieldset>
+                    <legend>Rutas Específicas</legend>
+                    <div class="form-group">
+                        <label for="apiActivatePath">Ruta de Activación</label>
+                        <input type="text" id="apiActivatePath" name="apiActivatePath" placeholder="Ej. /api/activate">
+                    </div>
+                    <div class="form-group">
+                        <label for="apiAuthPath">Ruta de Autenticación</label>
+                        <input type="text" id="apiAuthPath" name="apiAuthPath" placeholder="Ej. /api/authenticate">
+                    </div>
+                    <div class="form-group">
+                        <label for="apiRefreshTokenPath">Ruta de Refresco</label>
+                        <input type="text" id="apiRefreshTokenPath" name="apiRefreshTokenPath" placeholder="Ej. /api/refresh-token">
+                    </div>
+                    <div class="form-group">
+                        <label for="apiLogPath">Ruta de Logs</label>
+                        <input type="text" id="apiLogPath" name="apiLogPath" placeholder="Ej. /api/logs">
+                    </div>
+                    <div class="form-group">
+                        <label for="apiAmbientDataPath">Ruta de Datos Ambientales</label>
+                        <input type="text" id="apiAmbientDataPath" name="apiAmbientDataPath" placeholder="Ej. /api/ambient-data">
+                    </div>
+                    <div class="form-group">
+                        <label for="apiCaptureDataPath">Ruta de Datos de Captura</label>
+                        <input type="text" id="apiCaptureDataPath" name="apiCaptureDataPath" placeholder="Ej. /api/capture-data">
+                    </div>
+                    <div class="form-group">
+                        <label for="data_interval_minutes">Intervalo de Datos por Defecto (min)</label>
+                        <input type="number" id="data_interval_minutes" name="data_interval_minutes">
+                    </div>
+                </fieldset>
+            </details>
+
+            <button type="submit" id="save-button">Guardar y Reiniciar</button>
+            <div id="status-message"></div>
+        </form>
+
+        <hr>
+        <section class="logs-section">
+            <h2>Visor de Logs</h2>
+            <div class="form-group">
+                <label for="log-select">Seleccionar archivo de log:</label>
+                <select id="log-select" name="log-select">
+                    <option value="">Cargando lista...</option>
+                </select>
+                <button id="refresh-logs-btn">Refrescar</button>
+            </div>
+            <pre id="log-content">Seleccione un archivo para ver su contenido.</pre>
+        </section>
+    </main>
+
+    <script src="script.js"></script>
+</body>
+</html>

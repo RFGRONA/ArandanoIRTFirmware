@@ -1,79 +1,83 @@
 /**
  * @file MLX90640Sensor.h
- * @brief Defines a wrapper class for the MLX90640 Thermal Camera sensor.
+ * @brief Define una clase "wrapper" (envoltorio) para el sensor de Cámara Térmica MLX90640.
  *
- * Provides an interface to initialize and read thermal data frames (32x24 pixels)
- * from an MLX90640 sensor using a specific I2C bus instance and the
- * Adafruit MLX90640 library. Also includes helper methods to calculate
- * average, maximum, and minimum temperatures from the latest frame.
+ * Proporciona una interfaz para inicializar y leer fotogramas (frames) de datos
+ * térmicos (32x24 píxeles) desde un sensor MLX90640 usando una instancia I2C
+ * específica y la librería Adafruit MLX90640.
  */
 #ifndef MLX90640SENSOR_H
 #define MLX90640SENSOR_H
 
-#include <Arduino.h>           // Standard Arduino definitions
-#include <Wire.h>              // Required for I2C communication (TwoWire class)
-#include <Adafruit_MLX90640.h> // Include the Adafruit MLX90640 library
+#include <Arduino.h>           
+#include <Wire.h>              // Requerido para la comunicación I2C (clase TwoWire)
+#include <Adafruit_MLX90640.h> // Incluye la librería base de Adafruit MLX90640
 
 /**
  * @class MLX90640Sensor
- * @brief Wrapper class simplifying the use of an MLX90640 thermal camera sensor.
+ * @brief Clase wrapper que simplifica el uso de la cámara térmica MLX90640.
  *
- * Encapsulates the Adafruit MLX90640 library object, providing methods to initialize
- * the sensor, read full thermal frames (32x24 = 768 pixels), and access the data
- * either as a raw buffer or through calculated statistics (min, max, average).
+ * Encapsula el objeto de la librería Adafruit, proporcionando métodos para
+ * inicializar el sensor, leer fotogramas térmicos completos (32x24 = 768 píxeles)
+ * y acceder al buffer de datos crudos.
  */
 class MLX90640Sensor {
 public:
     /**
-     * @brief Constructor for the MLX90640 sensor wrapper.
-     * @param wire Reference to the TwoWire instance (e.g., Wire, Wire1) the sensor is connected to.
+     * @brief Constructor para el wrapper del MLX90640.
+     * @param wire Referencia a la instancia TwoWire (ej. Wire, Wire1) a la que está conectado el sensor.
      */
     MLX90640Sensor(TwoWire &wire);
 
     /**
-     * @brief Initializes the MLX90640 sensor communication and configuration.
+     * @brief Inicializa la comunicación y configuración del sensor MLX90640.
      *
-     * Attempts to initialize communication using the default I2C address (0x33).
-     * Configures the sensor operating parameters:
-     * - Mode: Chess pattern readout (`MLX90640_CHESS`)
-     * - ADC Resolution: 18-bit (`MLX90640_ADC_18BIT`)
-     * - Refresh Rate: 0.5 Hz (`MLX90640_0_5_HZ`) for lower noise.
-     * This method should be called once in `setup()`.
-     * @note IMPORTANT: A delay MUST be added in your sketch *after* calling `begin()`
-     * and *before* the first call to `readFrame()`. The required delay depends
-     * on the refresh rate (e.g., > 1 second for 0.5 Hz, > 0.5s for 1Hz).
-     * This allows the sensor time to perform its initial measurements.
-     * @return `true` if initialization and configuration were successful, `false` otherwise.
+     * Intenta inicializar la comunicación usando la dirección I2C por defecto (0x33).
+     * Configura los parámetros operativos del sensor:
+     * - Modo: Lectura en patrón 'Chess' (`MLX90640_CHESS`)
+     * - Resolución ADC: 18-bit (`MLX90640_ADC_18BIT`)
+     * - Tasa de Refresco: 0.5 Hz (`MLX90640_0_5_HZ`) para menor ruido.
+     * Este método debe ser llamado una vez en `setup()`.
+     *
+     * @note IMPORTANTE: Se DEBE añadir un retardo (`delay`) en el sketch *después*
+     * de llamar a `begin()` y *antes* de la primera llamada a `readFrame()`.
+     * El retardo requerido depende de la tasa de refresco (ej. > 2 segundos para 0.5 Hz).
+     * Esto da tiempo al sensor para realizar sus mediciones iniciales.
+     *
+     * @return `true` si la inicialización y configuración fueron exitosas, `false` en caso contrario.
      */
     bool begin();
 
     /**
-     * @brief Reads a new thermal data frame from the sensor into the internal buffer.
+     * @brief Lee un nuevo fotograma de datos térmicos en el buffer interno.
      *
-     * Calls the underlying library function (`getFrame`) to retrieve all 768 pixel
-     * temperature values and store them in the internal `frame` buffer.
-     * @return `true` if a complete frame was successfully read, `false` if an error occurred
-     * (e.g., I2C communication failure, incomplete frame).
+     * Llama a la función de la librería (`getFrame`) para obtener los 768 valores
+     * de temperatura. (Ver implementación en .cpp para la lógica de promediado).
+     *
+     * @return `true` si se leyó un fotograma completo (o promediado) exitosamente,
+     * `false` si ocurrió un error.
      */
     bool readFrame();
 
     /**
-     * @brief Gets a direct pointer to the internal thermal data buffer.
+     * @brief Obtiene un puntero directo al buffer interno de datos térmicos.
      *
-     * Provides access to the raw temperature data from the last successful `readFrame()` call.
-     * The buffer is a flat array containing 768 (`32 * 24`) float values representing
-     * pixel temperatures.
-     * @return Pointer to the internal float array `frame` containing temperatures in degrees Celsius ($^{\circ}C$).
-     * @note The data pointed to is only valid after `readFrame()` returns `true`.
-     * Calling this before a successful read or after a failed read will return a pointer
-     * to potentially uninitialized or outdated data. The pointer itself remains valid.
+     * Proporciona acceso a los datos crudos de temperatura de la última llamada
+     * exitosa a `readFrame()`. El buffer es un array plano de 768 (`32 * 24`)
+     * valores flotantes que representan las temperaturas.
+     *
+     * @return Puntero al array interno `frame` (float) que contiene las temperaturas en grados Celsius ($^{\circ}C$).
+     *
+     * @note Los datos apuntados solo son válidos después de que `readFrame()`
+     * retorne `true`. Llamar a esto antes de una lectura exitosa o después de
+     * una fallida retornará un puntero a datos desactualizados o no inicializados.
      */
     float* getThermalData();
 
 private:
-    Adafruit_MLX90640 mlx;    ///< @brief Instance of the underlying Adafruit MLX90640 library object.
-    float frame[32 * 24];     ///< @brief Internal buffer to store 768 pixel temperatures (degrees Celsius, $^{\circ}C$) from the last frame read.
-    TwoWire &_wire;           ///< @brief Reference to the I2C bus instance (e.g., Wire or Wire1) to be used.
+    Adafruit_MLX90640 mlx;    ///< Instancia de la librería Adafruit MLX90640 subyacente.
+    float frame[32 * 24];     ///< Buffer interno para almacenar 768 temp. (Celsius, $^{\circ}C$).
+    TwoWire &_wire;           ///< Referencia al bus I2C (ej. Wire o Wire1) a utilizar.
 };
 
 #endif // MLX90640SENSOR_H

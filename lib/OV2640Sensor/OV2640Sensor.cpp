@@ -1,50 +1,50 @@
 /**
  * @file OV2640Sensor.cpp
- * @brief Implements the OV2640Sensor wrapper class using the ESP-IDF camera driver.
+ * @brief Implementa la clase wrapper OV2640Sensor usando el driver de cámara ESP-IDF.
  */
 #include "OV2640Sensor.h"
+#include "esp_camera.h"   // Header principal del driver de cámara de ESP-IDF
 
-// --- Hardware Pin Configuration ---
-// Pin definition for the specific ESP32-S3 board used (e.g., ESP32-S3-WROOM-1 N16R8 variant)
-// Modify these pins according to your specific hardware connections.
-#define PWDN_GPIO_NUM     -1 ///< Power Down pin GPIO number (-1 if not used/wired).
-#define RESET_GPIO_NUM    -1 ///< Reset pin GPIO number (-1 if not used/wired).
-#define XCLK_GPIO_NUM     15 ///< External Clock input pin GPIO number.
-#define SIOD_GPIO_NUM     4  ///< SCCB (I2C-like) Data pin (Serial Input/Output Data) GPIO number.
-#define SIOC_GPIO_NUM     5  ///< SCCB (I2C-like) Clock pin (Serial Input Clock) GPIO number.
+// --- Configuración de Pines Hardware ---
+// Definición de pines para la placa ESP32-S3 específica del proyecto.
+// ¡Modificar estos pines según las conexiones de hardware específicas!
+#define PWDN_GPIO_NUM     -1 ///< Pin Power Down (-1 = no usado).
+#define RESET_GPIO_NUM    -1 ///< Pin Reset (-1 = no usado).
+#define XCLK_GPIO_NUM     15 ///< Pin de Reloj Externo (XCLK).
+#define SIOD_GPIO_NUM     4  ///< Pin de Datos SCCB (I2C) (SIOD).
+#define SIOC_GPIO_NUM     5  ///< Pin de Reloj SCCB (I2C) (SIOC).
 
-// Camera Data pins (Parallel 8-bit interface)
-#define Y9_GPIO_NUM       16 ///< Camera Data Bus line 7 (D7) GPIO number.
-#define Y8_GPIO_NUM       17 ///< Camera Data Bus line 6 (D6) GPIO number.
-#define Y7_GPIO_NUM       18 ///< Camera Data Bus line 5 (D5) GPIO number.
-#define Y6_GPIO_NUM       12 ///< Camera Data Bus line 4 (D4) GPIO number.
-#define Y5_GPIO_NUM       10 ///< Camera Data Bus line 3 (D3) GPIO number.
-#define Y4_GPIO_NUM       8  ///< Camera Data Bus line 2 (D2) GPIO number.
-#define Y3_GPIO_NUM       9  ///< Camera Data Bus line 1 (D1) GPIO number.
-#define Y2_GPIO_NUM       11 ///< Camera Data Bus line 0 (D0) GPIO number.
+// Pines de Datos de la Cámara (Interfaz paralela de 8 bits)
+#define Y9_GPIO_NUM       16 ///< Pin de Bus de Datos 7 (Y9/D7).
+#define Y8_GPIO_NUM       17 ///< Pin de Bus de Datos 6 (Y8/D6).
+#define Y7_GPIO_NUM       18 ///< Pin de Bus de Datos 5 (Y7/D5).
+#define Y6_GPIO_NUM       12 ///< Pin de Bus de Datos 4 (Y6/D4).
+#define Y5_GPIO_NUM       10 ///< Pin de Bus de Datos 3 (Y5/D3).
+#define Y4_GPIO_NUM       8  ///< Pin de Bus de Datos 2 (Y4/D2).
+#define Y3_GPIO_NUM       9  ///< Pin de Bus de Datos 1 (Y3/D1).
+#define Y2_GPIO_NUM       11 ///< Pin de Bus de Datos 0 (Y2/D0).
 
-// Camera Synchronization pins
-#define VSYNC_GPIO_NUM    6  ///< Vertical Sync signal GPIO number.
-#define HREF_GPIO_NUM     7  ///< Horizontal Reference signal GPIO number.
-#define PCLK_GPIO_NUM     13 ///< Pixel Clock signal GPIO number.
+// Pines de Sincronización de la Cámara
+#define VSYNC_GPIO_NUM    6  ///< Pin de Sincronización Vertical (VSYNC).
+#define HREF_GPIO_NUM     7  ///< Pin de Referencia Horizontal (HREF).
+#define PCLK_GPIO_NUM     13 ///< Pin de Reloj de Píxel (PCLK).
 // --------------------------------
 
 /**
- * @brief Default constructor implementation.
- * Does nothing, as initialization requires hardware context provided in begin().
+ * @brief Constructor por defecto.
  */
 OV2640Sensor::OV2640Sensor() {
-    // Intentionally empty.
+    // Intencionalmente vacío. La inicialización ocurre en begin().
 }
 
 /**
- * @brief Initializes the camera hardware and driver.
+ * @brief Inicializa el hardware y el driver de la cámara.
  */
 bool OV2640Sensor::begin() {
-    // Configuration structure required by the esp_camera_init function.
+    // Estructura de configuración requerida por esp_camera_init.
     camera_config_t config;
 
-    // --- Populate Pin Configuration ---
+    // --- Configuración de Pines ---
     config.pin_pwdn = PWDN_GPIO_NUM;
     config.pin_reset = RESET_GPIO_NUM;
     config.pin_xclk = XCLK_GPIO_NUM;
@@ -64,111 +64,92 @@ bool OV2640Sensor::begin() {
     config.pin_href = HREF_GPIO_NUM;
     config.pin_pclk = PCLK_GPIO_NUM;
 
-    // --- Populate Clock, Format, Frame, and Buffer Configuration ---
-    config.xclk_freq_hz = 20000000;       // Set camera external clock frequency (e.g., 20MHz).
-    config.ledc_channel = LEDC_CHANNEL_0; // Use LEDC channel 0 for generating XCLK.
-    config.ledc_timer = LEDC_TIMER_0;     // Use LEDC timer 0 for XCLK generation.
+    // --- Configuración de Reloj, Formato, Tamaño y Buffers ---
+    config.xclk_freq_hz = 20000000;       // Frecuencia del reloj externo (ej. 20MHz).
+    config.ledc_channel = LEDC_CHANNEL_0; // Canal LEDC para generar XCLK.
+    config.ledc_timer = LEDC_TIMER_0;     // Timer LEDC para XCLK.
 
-    config.pixel_format = PIXFORMAT_JPEG; // Set desired pixel format (JPEG for direct use).
-                                          // Other options: PIXFORMAT_RGB565, PIXFORMAT_YUV422 etc.
-    config.frame_size = FRAMESIZE_VGA;    // Set frame size (640x480). Others: SVGA(800x600), XGA(1024x768), etc.
-    config.jpeg_quality = 10;             // Set JPEG quality (0-63). Lower number = higher quality, larger file size.
+    config.pixel_format = PIXFORMAT_JPEG; // Formato de píxel deseado (JPEG para uso directo).
+    config.frame_size = FRAMESIZE_VGA;    // Tamaño del fotograma (640x480).
+    config.jpeg_quality = 10;             // Calidad JPEG (0-63). Menor número = mayor calidad, mayor tamaño.
 
-    // Framebuffer configuration
-    config.fb_count = 1;                  // Number of framebuffers. 1 means capture stops until buffer is returned.
-                                          // 2 allows for faster continuous capture but uses more PSRAM.
-    config.fb_location = CAMERA_FB_IN_PSRAM; // Store framebuffers in external PSRAM (essential for larger frames).
-    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY; // Capture strategy: capture when buffer is free.
-                                               // CAMERA_GRAB_LATEST drops older frames if processing is slow.
+    // Configuración de Framebuffers
+    config.fb_count = 1;                  // Número de framebuffers. 1 = la captura se detiene hasta que el buffer se retorna.
+    config.fb_location = CAMERA_FB_IN_PSRAM; // Almacenar framebuffers en PSRAM (esencial para JPEG/VGA).
+    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY; // Estrategia de captura: capturar cuando el buffer esté libre.
 
-    // --- Initialize the Camera Driver ---
+    // --- Inicializar el Driver de la Cámara ---
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
-        // Initialization failed. Log the ESP-IDF error code for debugging.
-        // Ensure Serial is initialized (`Serial.begin(...)`) before using Serial.printf.
+        // Falló la inicialización.
+        // (Habilitar Serial.printf para ver el código de error ESP-IDF).
         // Serial.printf("Camera Init Failed with error 0x%x (%s)\n", err, esp_err_to_name(err));
-        return false; // Return failure indication.
+        return false;
     }
 
-    // Camera initialized successfully.
-    // Optional: Configure sensor settings like brightness, contrast etc. here if needed,
-    // using functions like `sensor_t * s = esp_camera_sensor_get(); s->set_...(s, value);`
-    // Serial.println("Camera initialized successfully.");
-    return true; // Return success indication.
+    // Cámara inicializada exitosamente.
+    // (Opcional: configurar brillo, contraste, etc. aquí).
+    return true;
 }
 
 /**
- * @brief Captures a single JPEG image frame into a newly allocated buffer.
+ * @brief Captura un fotograma JPEG en un buffer recién alocado.
  */
 uint8_t* OV2640Sensor::captureJPEG(size_t &length) {
-    // Reset length output parameter
+    // Reinicia el parámetro de salida 'length'.
     length = 0;
 
-    // 1. Acquire a framebuffer containing the captured image from the driver.
+    // 1. Adquirir un framebuffer del driver que contiene la imagen capturada.
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
 #ifdef ENABLE_DEBUG_SERIAL
         Serial.println("[OV2640Sensor] CRITICAL: esp_camera_fb_get() returned NULL!");
 #endif
-        return nullptr; // Return null pointer indicating failure.
+        return nullptr; // Falla al obtener el frame.
     }
 
-    // Check if the format is indeed JPEG (as configured in begin)
+    // 2. Verificar que el formato sea JPEG (como se configuró en begin).
     if(fb->format != PIXFORMAT_JPEG){
 #ifdef ENABLE_DEBUG_SERIAL
-        Serial.printf("[OV2640Sensor] Camera capture failed: Unexpected pixel format %d, expected PIXFORMAT_JPEG (%d).\n", fb->format, PIXFORMAT_JPEG);
+        Serial.printf("[OV2640Sensor] Camera capture failed: Unexpected pixel format %d\n", fb->format);
 #endif
-        esp_camera_fb_return(fb); // Return the incorrect buffer
+        // ¡Importante! Retornar el buffer al driver aunque el formato sea incorrecto.
+        esp_camera_fb_return(fb); 
         return nullptr;
     }
 
-#ifdef ENABLE_DEBUG_SERIAL
-    // fb is guaranteed to be non-NULL here if we passed the first check.
-    Serial.printf("[OV2640Sensor] Framebuffer obtained: Width %u, Height %u, Length %u bytes, Format %d.\n", fb->width, fb->height, fb->len, fb->format);
-    Serial.printf("[OV2640Sensor] Attempting to ps_malloc %u bytes for JPEG copy.\n", fb->len);
-    Serial.printf("[OV2640Sensor] Total Free PSRAM before malloc: %u bytes.\n", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-    Serial.printf("[OV2640Sensor] Largest Free Contiguous PSRAM Block before malloc: %u bytes.\n", heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
-#endif
+    // (Los logs de depuración sobre PSRAM se omiten para claridad).
 
-    // 2. Allocate memory in PSRAM to store a copy of the JPEG data.
+    // 3. Alojar memoria en PSRAM para la *copia* de los datos JPEG.
+    // Se usa ps_malloc para asegurar que la memoria esté en PSRAM.
     uint8_t *jpegData = (uint8_t *)ps_malloc(fb->len);
     if (!jpegData) {
 #ifdef ENABLE_DEBUG_SERIAL
-        Serial.printf("[OV2640Sensor] CRITICAL: Failed to allocate %u bytes in PSRAM for JPEG copy.\n", (unsigned int)fb->len); // Cast to unsigned int for %u with printf
-        Serial.printf("[OV2640Sensor] Total Free PSRAM at allocation failure: %u bytes.\n", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-        Serial.printf("[OV2640Sensor] Largest Free Contiguous PSRAM Block at failure: %u bytes.\n", heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+        Serial.printf("[OV2640Sensor] CRITICAL: Failed to allocate %u bytes in PSRAM!\n", (unsigned int)fb->len);
 #endif
-        // IMPORTANT: Must return the original framebuffer to the driver even if allocation fails.
+        // ¡Crítico! Se debe retornar el framebuffer al driver aunque falle la alocación de memoria.
         esp_camera_fb_return(fb);
-        return nullptr; // Return null pointer indicating failure.
+        return nullptr; // Falla de alocación de memoria.
     }
 
-#ifdef ENABLE_DEBUG_SERIAL
-    Serial.printf("[OV2640Sensor] Successfully allocated %u bytes for JPEG copy at 0x%X.\n", (unsigned int)fb->len, (uint32_t)jpegData);
-#endif
-
-    // 3. Copy the JPEG data from the driver's buffer (fb->buf) to our new buffer (jpegData).
+    // 4. Copiar los datos desde el buffer del driver (fb->buf) a nuestro buffer (jpegData).
     memcpy(jpegData, fb->buf, fb->len);
-    length = fb->len; // Set the output parameter to the size of the copied data.
+    length = fb->len; // Asignar el tamaño de salida (bytes copiados).
 
-    // 4. Return the driver's framebuffer buffer so it can be reused for future captures.
-    // This is critical, otherwise the driver will run out of buffers.
-#ifdef ENABLE_DEBUG_SERIAL
-    Serial.printf("[OV2640Sensor] JPEG data copied. Returning original framebuffer (0x%X) to driver.\n", (uint32_t)fb);
-#endif
+    // 5. Retornar el framebuffer *original* del driver para que pueda ser reutilizado.
+    // Esto es absolutamente crítico; si no se hace, el driver se quedará sin buffers.
     esp_camera_fb_return(fb);
 
-    // 5. Return the pointer to the *copied* JPEG data buffer in PSRAM.
+    // 6. Retornar el puntero a nuestra *copia* de los datos JPEG en PSRAM.
+    // El llamador (caller) es ahora responsable de esta memoria.
     return jpegData;
 }
 
 /**
- * @brief Deinitializes the camera driver, releasing resources.
+ * @brief Desinicializa el driver de la cámara, liberando recursos.
  */
 void OV2640Sensor::end() {
-    // Calls the ESP-IDF function to properly shut down the camera driver
-    // and release associated hardware resources (I2S, DMA, GPIOs used by camera).
+    // Llama a la función de ESP-IDF para apagar correctamente el driver
+    // y liberar los recursos hardware (I2S, DMA, pines de cámara).
     esp_camera_deinit();
-    // Optional: Log deinitialization.
-    // Serial.println("Camera deinitialized.");
 }

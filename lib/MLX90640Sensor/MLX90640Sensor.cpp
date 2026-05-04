@@ -1,26 +1,27 @@
 /**
  * @file MLX90640Sensor.cpp
- * @brief Implements the MLX90640Sensor wrapper class methods.
+ * @brief Implementa los métodos de la clase wrapper MLX90640Sensor.
  */
 #include "MLX90640Sensor.h"
 
-// --- Configuration for Temporal Averaging ---
-// Define the number of frames to average for noise reduction.
-// Set to 1 to disable averaging and perform a single read.
+// --- Configuración para Promediado Temporal (Temporal Averaging) ---
+
+// Define el número de fotogramas a promediar para reducir el ruido.
+// Poner en 1 para deshabilitar el promediado y realizar una lectura única.
 #define NUM_SAMPLES_TO_AVERAGE 6
 
-// Define the delay between samples in milliseconds.
-// This should be based on the sensor's refresh rate.
-// For 0.5Hz, the period is 2000ms. A small margin is added.
+// Define el retardo (delay) entre muestras en milisegundos.
+// Debe basarse en la tasa de refresco del sensor.
+// Para 0.5Hz, el periodo es 2000ms. Se añade un pequeño margen.
 #define INTER_SAMPLE_DELAY_MS 2500
 
 
-// Constructor: Initializes the TwoWire reference.
+// Constructor: Inicializa la referencia TwoWire y el buffer 'frame' (a ceros).
 MLX90640Sensor::MLX90640Sensor(TwoWire &wire) : _wire(wire), frame{} {
-    // The Adafruit_MLX90640 'mlx' object is implicitly default-constructed here.
+    // El objeto 'mlx' se construye por defecto aquí.
 }
 
-// Initializes the sensor communication and sets operating parameters.
+// Inicializa la comunicación con el sensor y establece los parámetros operativos.
 bool MLX90640Sensor::begin() {
     if (!mlx.begin(MLX90640_I2CADDR_DEFAULT, &_wire)) {
         #ifdef ENABLE_DEBUG_SERIAL
@@ -33,27 +34,29 @@ bool MLX90640Sensor::begin() {
         Serial.println(F("[MLX90640] Initialized Successfully."));
     #endif
 
-    // Configure sensor parameters for best noise performance.
+    // Configura los parámetros del sensor para el mejor rendimiento (reducción de ruido).
     mlx.setMode(MLX90640_CHESS);
     mlx.setResolution(MLX90640_ADC_18BIT);
-    mlx.setRefreshRate(MLX90640_0_5_HZ);
+    mlx.setRefreshRate(MLX90640_0_5_HZ); // 0.5 Hz = 1 fotograma cada 2 segundos
 
     return true;
 }
 
 /**
- * @brief Reads a thermal data frame, averaging multiple samples for better accuracy.
+ * @brief Lee un fotograma térmico, promediando múltiples muestras para mejor precisión.
  *
- * This function performs temporal averaging to reduce noise. It captures a configurable
- * number of frames (NUM_SAMPLES_TO_AVERAGE), waiting for the sensor's refresh cycle
- * between each capture, and calculates the average temperature for each pixel.
- * The final averaged result is stored in the internal 'frame' buffer.
+ * Esta función realiza un "promediado temporal" para reducir el ruido.
+ * Captura un número configurable de fotogramas (NUM_SAMPLES_TO_AVERAGE),
+ * esperando el ciclo de refresco del sensor entre cada captura, y calcula
+ * el promedio de temperatura para cada píxel.
+ * El resultado promediado final se almacena en el buffer interno 'frame'.
  *
- * @return True if the averaged frame was read successfully, false otherwise.
+ * @return True si el fotograma promediado se leyó exitosamente, false en caso contrario.
  */
 bool MLX90640Sensor::readFrame() {
-    // If averaging is disabled (samples <= 1), perform a single, standard read.
+    // Si el promediado está deshabilitado (muestras <= 1), realiza una lectura única.
     if (NUM_SAMPLES_TO_AVERAGE <= 1) {
+        // retorna 'true' si getFrame() devuelve 0 (éxito)
         return (mlx.getFrame(frame) == 0);
     }
 
@@ -61,42 +64,43 @@ bool MLX90640Sensor::readFrame() {
         Serial.printf("[MLX90640] Starting thermal frame averaging (%d samples)...\n", NUM_SAMPLES_TO_AVERAGE);
     #endif
 
-    // Temporary buffer to store each individual frame reading.
-    // This is allocated on the stack. 768 * 4 bytes = 3KB, which is safe for ESP32.
+    // Buffer temporal para almacenar cada lectura de fotograma individual.
+    // Se aloja en el stack (pila). 768 * 4 bytes = 3KB, lo cual es seguro en ESP32.
     float tempFrame[768];
 
-    // Step 1: Clear the main 'frame' buffer to use it as an accumulator.
+    // Paso 1: Limpia el buffer principal 'frame' para usarlo como acumulador.
     for (int i = 0; i < 768; i++) {
         frame[i] = 0.0f;
     }
 
-    // Step 2: Acquire and accumulate multiple samples.
+    // Paso 2: Adquirir y acumular múltiples muestras.
     for (uint8_t s = 0; s < NUM_SAMPLES_TO_AVERAGE; s++) {
-        // For the first sample (s=0), we don't wait. For subsequent samples,
-        // we wait for the sensor's refresh period to get new data.
+        // Para la primera muestra (s=0), no esperamos. Para las siguientes,
+        // esperamos el periodo de refresco del sensor (INTER_SAMPLE_DELAY_MS)
+        // para asegurar que estamos leyendo datos nuevos.
         if (s > 0) {
             delay(INTER_SAMPLE_DELAY_MS);
         }
 
-        // Attempt to read a single frame into the temporary buffer.
+        // Intenta leer un fotograma en el buffer temporal.
         if (mlx.getFrame(tempFrame) != 0) {
             #ifdef ENABLE_DEBUG_SERIAL
                 Serial.printf("[MLX90640] ERROR: Failed to read sample %d/%d.\n", s + 1, NUM_SAMPLES_TO_AVERAGE);
             #endif
-            return false; // Abort the entire process if any single read fails.
+            return false; // Aborta todo el proceso si una sola lectura falla.
         }
 
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.printf("[MLX90640]   - Sample %d/%d read successfully.\n", s + 1, NUM_SAMPLES_TO_AVERAGE);
         #endif
 
-        // Accumulate the values from the temporary frame into our main buffer.
+        // Acumula los valores del fotograma temporal en nuestro buffer principal 'frame'.
         for (int i = 0; i < 768; i++) {
             frame[i] += tempFrame[i];
         }
     }
 
-    // Step 3: Calculate the final average for each pixel.
+    // Paso 3: Calcula el promedio final para cada píxel.
     for (int i = 0; i < 768; i++) {
         frame[i] /= NUM_SAMPLES_TO_AVERAGE;
     }
@@ -105,11 +109,11 @@ bool MLX90640Sensor::readFrame() {
         Serial.println(F("[MLX90640] Frame averaging complete. Final data is ready."));
     #endif
 
-    return true; // Return true indicating success.
+    return true; // Retorna 'true' indicando éxito.
 }
 
-// Returns a direct pointer to the internal buffer holding the last read frame data.
+// Retorna un puntero directo al buffer interno que contiene los datos del último fotograma leído.
 float* MLX90640Sensor::getThermalData() {
-    // The data pointed to is the result of the last successful readFrame() call.
+    // Los datos apuntados son el resultado de la última llamada exitosa a readFrame().
     return frame;
 }

@@ -1,25 +1,22 @@
-// src/EnvironmentTasks.cpp
 #include "EnvironmentTasks.h"
-#include "ErrorLogger.h"         
-#include "EnvironmentDataJSON.h" 
+#include "ErrorLogger.h"         // Para registrar errores
+#include "EnvironmentDataJSON.h" // Para formatear y enviar el JSON
 
-// Define SENSOR_READ_RETRIES if it was originally in main.cpp
+// Define el número de reintentos para la lectura de sensores
 #define SENSOR_READ_RETRIES 3
 
 /**
- * @brief Reads the BH1750 light sensor value, attempting multiple times if necessary.
- * @param lightSensor Reference to the BH1750Sensor object.
- * @param[out] lightLevel Reference to a float variable where the light level (lux) will be stored.
- * @return `true` if a valid light level was read successfully, `false` otherwise.
+ * @brief Lee el sensor de luz BH1750 con reintentos.
  */
 bool readLightSensorWithRetry_Env(BH1750Sensor& lightSensor, float &lightLevel) {
-    lightLevel = -1.0f; // Initialize to invalid
+    lightLevel = -1.0f; // Inicializa como inválido
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.print("[EnvTasks] Reading light sensor (BH1750)...");
     #endif
     for (int i = 0; i < SENSOR_READ_RETRIES; ++i) {
         lightLevel = lightSensor.readLightLevel();
-        if (lightLevel >= 0.0f) { // Valid lux readings are typically >= 0
+        // Una lectura válida de lux debe ser 0.0 o positiva
+        if (lightLevel >= 0.0f) { 
             #ifdef ENABLE_DEBUG_SERIAL
                 Serial.printf(" OK (%.2f lx)\n", lightLevel);
             #endif
@@ -28,7 +25,7 @@ bool readLightSensorWithRetry_Env(BH1750Sensor& lightSensor, float &lightLevel) 
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.print(".");
         #endif
-        delay(500); // Wait before retrying
+        delay(500); // Espera antes de reintentar
     }
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.printf(" FAILED after %d retries.\n", SENSOR_READ_RETRIES);
@@ -37,33 +34,31 @@ bool readLightSensorWithRetry_Env(BH1750Sensor& lightSensor, float &lightLevel) 
 }
 
 /**
- * @brief Reads temperature and humidity from the DHT22 sensor, with retries.
- * @param dhtSensor Reference to the DHT22Sensor object.
- * @param[out] temperature Reference to a float for storing temperature in Celsius.
- * @param[out] humidity Reference to a float for storing relative humidity in %.
- * @return `true` if both temperature and humidity were read successfully, `false` otherwise.
+ * @brief Lee el sensor BME280 (Temp, Hum, Pres) con reintentos.
  */
-bool readDHTSensorWithRetry_Env(DHT22Sensor& dhtSensor, float &temperature, float &humidity) {
-    temperature = NAN; // Initialize to Not-a-Number
+bool readBmeSensorWithRetry_Env(BME280Sensor& bmeSensor, float &temperature, float &humidity, float &pressure) {
+    temperature = NAN;
     humidity = NAN;
+    pressure = NAN;
     #ifdef ENABLE_DEBUG_SERIAL
-        Serial.print("[EnvTasks] Reading temp/humidity sensor (DHT22)...");
+        Serial.print("[EnvTasks] Reading environment sensor (BME280)...");
     #endif
     for (int i = 0; i < SENSOR_READ_RETRIES; ++i) {
-        temperature = dhtSensor.readTemperature();
-        delay(100); // Small delay often helps DHT sensors
-        humidity = dhtSensor.readHumidity();
+        temperature = bmeSensor.readTemperature();
+        humidity = bmeSensor.readHumidity();
+        pressure = bmeSensor.readPressure();
 
-        if (!isnan(temperature) && !isnan(humidity)) {
+        // Verifica que todas las lecturas sean válidas (no Not-a-Number)
+        if (!isnan(temperature) && !isnan(humidity) && !isnan(pressure)) {
             #ifdef ENABLE_DEBUG_SERIAL
-                Serial.printf(" OK (Temp: %.2f C, Hum: %.1f %%)\n", temperature, humidity);
+                Serial.printf(" OK (Temp: %.2f C, Hum: %.1f %%, Pres: %.2f hPa)\n", temperature, humidity, pressure);
             #endif
             return true;
         }
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.print(".");
         #endif
-        delay(1000); // Wait longer for DHT retries
+        delay(500); // Espera antes de reintentar
     }
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.printf(" FAILED after %d retries.\n", SENSOR_READ_RETRIES);
@@ -71,22 +66,11 @@ bool readDHTSensorWithRetry_Env(DHT22Sensor& dhtSensor, float &temperature, floa
     return false;
 }
 
+
 /**
- * @brief Sends the collected environmental data to the server.
- * Uses EnvironmentDataJSON utility for formatting and sending. Handles token refresh on 401.
- * @param sdMgr Reference to the SDManager for logging and state management.
- * @param timeMgr Reference to the TimeManager for time synchronization.
- * @param cfg Reference to the application's configuration.
- * @param api_obj Reference to the API communication object.
- * @param lightLevel The measured light level.
- * @param temperature The measured temperature (external DHT22).
- * @param humidity The measured humidity (external DHT22).
- * @param sysLed Reference to the LEDStatus object for visual feedback.
- * @param internalTempForLog Internal temperature of the device for logging.
- * @param internalHumForLog Internal humidity of the device for logging.
- * @return `true` if data was sent successfully, `false` otherwise.
+ * @brief Envía los datos ambientales al servidor, manejando la autenticación (401).
  */
-bool sendEnvironmentDataToServer_Env(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, float lightLevel, float temperature, float humidity, LEDStatus& sysLed, float internalTempForLog, float internalHumForLog) { 
+bool sendEnvironmentDataToServer_Env(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, const String& timestamp, float lightLevel, float temperature, float humidity, float pressure, LEDStatus& sysLed, float internalTempForLog) { 
     sysLed.setState(SENDING_DATA);
     String fullUrl = api_obj.getBaseApiUrl() + cfg.apiAmbientDataPath;
     String token = api_obj.getAccessToken();
@@ -97,103 +81,103 @@ bool sendEnvironmentDataToServer_Env(SDManager& sdMgr, TimeManager& timeMgr, Con
         Serial.println("  Target URL: " + fullUrl);
     #endif
 
-    int httpCode = EnvironmentDataJSON::IOEnvironmentData(fullUrl, token, lightLevel, temperature, humidity);
+    // 1. Primer intento de envío
+    int httpCode = EnvironmentDataJSON::IOEnvironmentData(fullUrl, token, timestamp, lightLevel, temperature, humidity, pressure);
 
     if (httpCode == 200 || httpCode == 204) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[EnvTasks] Environmental data sent successfully."));
         #endif
-        return true;
+        return true; // Éxito
+    
+    // 2. Manejo de error de autenticación (401 Unauthorized)
     } else if (httpCode == 401 && api_obj.isActivated()) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[EnvTasks] Env data send failed (401). Attempting token refresh..."));
         #endif
         ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, token, LOG_TYPE_WARNING, 
                              "Env data send returned 401. Attempting token refresh.", 
-                             internalTempForLog, internalHumForLog); 
+                             internalTempForLog); 
         
+        // Intenta refrescar el token
         int refreshHttpCode = api_obj.performTokenRefresh();
-        if (refreshHttpCode == 200) {
+        
+        if (refreshHttpCode == 200) { // Refresco de token exitoso
             #ifdef ENABLE_DEBUG_SERIAL
                 Serial.println(F("[EnvTasks] Token refresh successful. Re-trying env data send..."));
             #endif
             ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, api_obj.getAccessToken(), LOG_TYPE_INFO, 
                                  "Token refreshed successfully after env data 401.", 
-                                 internalTempForLog, internalHumForLog); 
+                                 internalTempForLog); 
+            
+            // 3. Segundo intento de envío (con el nuevo token)
             token = api_obj.getAccessToken();
-            httpCode = EnvironmentDataJSON::IOEnvironmentData(fullUrl, token, lightLevel, temperature, humidity);
+            httpCode = EnvironmentDataJSON::IOEnvironmentData(fullUrl, token, timestamp, lightLevel, temperature, humidity, pressure);
+            
             if (httpCode == 200 || httpCode == 204) {
                 #ifdef ENABLE_DEBUG_SERIAL
                     Serial.println(F("[EnvTasks] Environmental data sent successfully on retry."));
                 #endif
-                return true;
+                return true; // Éxito en el reintento
             } else {
                  #ifdef ENABLE_DEBUG_SERIAL
                     Serial.printf("[EnvTasks] Env data send failed on retry. HTTP Code: %d\n", httpCode);
                 #endif
                 ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, token, LOG_TYPE_ERROR, 
                                      String("Env data send failed on retry after refresh. HTTP: ") + String(httpCode), 
-                                     internalTempForLog, internalHumForLog); 
+                                     internalTempForLog); 
             }
-        } else {
+        } else { // Fallo en el refresco del token
             #ifdef ENABLE_DEBUG_SERIAL
                 Serial.printf("[EnvTasks] Token refresh failed after 401. HTTP Code: %d\n", refreshHttpCode);
             #endif
              ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, token, LOG_TYPE_ERROR, 
                                   String("Token refresh failed after env data 401. Refresh HTTP: ") + String(refreshHttpCode), 
-                                  internalTempForLog, internalHumForLog); 
+                                  internalTempForLog); 
         }
-    } else { // Other HTTP errors or client errors from IOEnvironmentData
+    } else { // Otros errores HTTP (500, 404, timeouts < 0, etc.)
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.printf("[EnvTasks] Error sending environmental data. HTTP Code: %d\n", httpCode);
         #endif
          ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, token, LOG_TYPE_ERROR, 
                               String("Failed to send environmental data. HTTP Code: ") + String(httpCode), 
-                              internalTempForLog, internalHumForLog); 
+                              internalTempForLog); 
     }
 
+    // Si llegamos aquí, todos los intentos fallaron
     sysLed.setState(ERROR_SEND);
     delay(1000);
     return false;
 }
 
 /**
- * @brief Orchestrates reading all environmental sensors and sending their data.
- * @param sdMgr Reference to the SDManager for logging and state management.
- * @param timeMgr Reference to the TimeManager for time synchronization.
- * @param cfg Reference to the application's configuration.
- * @param api_obj Reference to the API communication object.
- * @param lightSensor Reference to the BH1750Sensor object.
- * @param dhtSensor Reference to the DHT22Sensor object.
- * @param sysLed Reference to the LEDStatus object for visual feedback.
- * @param internalTempForLog Internal temperature of the device for logging.
- * @param internalHumForLog Internal humidity of the device for logging.
- * @return `true` if all sensor data was successfully read AND sent, `false` otherwise.
+ * @brief Orquesta la lectura, envío y archivo/guardado de datos ambientales.
  */
-bool performEnvironmentTasks_Env(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, BH1750Sensor& lightSensor, DHT22Sensor& dhtSensor, LEDStatus& sysLed, float internalTempForLog, float internalHumForLog) { 
+bool performEnvironmentTasks_Env(SDManager& sdMgr, TimeManager& timeMgr, Config& cfg, API& api_obj, BH1750Sensor& lightSensor, BME280Sensor& bmeSensor, LEDStatus& sysLed, float internalTempForLog) { 
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("[EnvTasks] --- Reading Environment Sensors & Sending Data ---"));
     #endif
 
+    String timestamp = timeMgr.getCurrentTimestampString();
     float lightLevel = -1.0f;
-    float temperature = NAN; // External DHT22 temperature
-    float humidity = NAN;    // External DHT22 humidity
+    float temperature = NAN;
+    float humidity = NAN;
+    float pressure = NAN;
 
     sysLed.setState(TAKING_DATA);
 
+    // --- 1. Leer Sensores ---
     bool lightOK = readLightSensorWithRetry_Env(lightSensor, lightLevel);
-    bool dhtOK = readDHTSensorWithRetry_Env(dhtSensor, temperature, humidity);
+    bool bmeOK = readBmeSensorWithRetry_Env(bmeSensor, temperature, humidity, pressure);
 
-    if (!lightOK || !dhtOK) {
+    if (!lightOK || !bmeOK) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[EnvTasks] Error: Failed to read one or more environment sensors after retries."));
         #endif
         sysLed.setState(ERROR_SENSOR);
-        String logUrl = api_obj.getBaseApiUrl() + cfg.apiLogPath;
-
-        ErrorLogger::sendLog(sdMgr, timeMgr, logUrl, api_obj.getAccessToken(), LOG_TYPE_ERROR, 
+        ErrorLogger::sendLog(sdMgr, timeMgr, api_obj.getBaseApiUrl() + cfg.apiLogPath, api_obj.getAccessToken(), LOG_TYPE_ERROR, 
                              String("Failed to read environment sensors."), 
-                             internalTempForLog, internalHumForLog); 
+                             internalTempForLog); 
         return false;
     }
 
@@ -201,65 +185,69 @@ bool performEnvironmentTasks_Env(SDManager& sdMgr, TimeManager& timeMgr, Config&
         Serial.println(F("[EnvTasks] Environment sensors read successfully. Preparing to send and archive..."));
     #endif
 
-    // --- Create JSON payload for archival ---
+    // --- 2. Crear el payload JSON (para guardar en SD) ---
+    // Este JSON se crea *independientemente* del envío, para asegurar
+    // que los datos se guarden en la SD (ya sea en 'archive' o 'pending').
     String envDataJsonString;
-    JsonDocument doc; // ArduinoJson v6+ uses dynamic allocation by default
-    // Use fixed point for temperature and humidity in JSON for consistency
-    if (!isnan(lightLevel)) doc["light"] = lightLevel;
-    else doc["light"] = nullptr;
-
-    if (!isnan(temperature)) doc["temperature"] = serialized(String(temperature, 2));
-    else doc["temperature"] = nullptr;
-    
-    if (!isnan(humidity)) doc["humidity"] = serialized(String(humidity, 1));
-    else doc["humidity"] = nullptr;
+    JsonDocument doc;
+    doc["timestamp"] = timestamp;
+    if (!isnan(lightLevel)) doc["light"] = lightLevel; else doc["light"] = nullptr;
+    if (!isnan(temperature)) doc["temperature"] = serialized(String(temperature, 2)); else doc["temperature"] = nullptr;
+    if (!isnan(humidity)) doc["humidity"] = serialized(String(humidity, 1)); else doc["humidity"] = nullptr;
+    if (!isnan(pressure)) doc["pressure"] = serialized(String(pressure, 2)); else doc["pressure"] = nullptr; 
     
     serializeJson(doc, envDataJsonString);
-    // --- End JSON payload creation ---
+    // --- Fin creación JSON ---
 
     bool sentSuccessfully = false;
-    if (!envDataJsonString.isEmpty()) {
-        sentSuccessfully = sendEnvironmentDataToServer_Env(sdMgr, timeMgr, cfg, api_obj, lightLevel, temperature, humidity, sysLed, internalTempForLog, internalHumForLog);
-        
-        // Archive or save to pending based on send status
-        if (sdMgr.isSDAvailable()) {
-            String filename = timeMgr.getCurrentTimestampString(true) + "_env.json"; // YYYYMMDD_HHMMSS_env.json
-            String targetPath;
-
-            if (sentSuccessfully) {
-                targetPath = String(ARCHIVE_ENVIRONMENTAL_DIR) + "/" + filename;
-                #ifdef ENABLE_DEBUG_SERIAL
-                    Serial.println("[EnvTasks] Archiving environmental data to: " + targetPath);
-                #endif
-            } else {
-                targetPath = String(AMBIENT_PENDING_DIR) + "/" + filename;
-                #ifdef ENABLE_DEBUG_SERIAL
-                    Serial.println("[EnvTasks] Saving environmental data to pending: " + targetPath);
-                #endif
-            }
-            
-            if (!sdMgr.writeTextFile(targetPath, envDataJsonString)) {
-                #ifdef ENABLE_DEBUG_SERIAL
-                    Serial.println("[EnvTasks] Failed to write environmental data to SD card at: " + targetPath);
-                #endif
-                ErrorLogger::logToSdOnly(sdMgr, timeMgr, LogLevel::ERROR, "Failed to write env data to " + targetPath, internalTempForLog, internalHumForLog);
-            }
-        } else {
-            #ifdef ENABLE_DEBUG_SERIAL
-                Serial.println("[EnvTasks] SD card not available, cannot archive or save pending environmental data.");
-            #endif
-        }
-
-    } else {
+    
+    if (envDataJsonString.isEmpty()) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[EnvTasks] Failed to create JSON string from sensor data. Cannot send or archive."));
         #endif
-        // This case implies sensor read was ok, but JSON serialization failed.
         sysLed.setState(ERROR_DATA); 
         ErrorLogger::sendLog(sdMgr, timeMgr, api_obj.getBaseApiUrl() + cfg.apiLogPath, api_obj.getAccessToken(), LOG_TYPE_ERROR, 
                              "Failed to create env JSON for sending/archiving.", 
-                             internalTempForLog, internalHumForLog);
-        return false; // Critical failure to form data
+                             internalTempForLog);
+        return false; // Falla crítica si no se puede formar el JSON
+    }
+
+    // --- 3. Intentar Enviar Datos ---
+    sentSuccessfully = sendEnvironmentDataToServer_Env(sdMgr, timeMgr, cfg, api_obj, timestamp, lightLevel, temperature, humidity, pressure, sysLed, internalTempForLog);
+    
+    // --- 4. Guardar en SD (Archive o Pending) ---
+    if (sdMgr.isSDAvailable()) {
+        String filename = timeMgr.getCurrentTimestampString(true) + "_env.json"; // Formato YYYYMMDD_HHMMSS_env.json
+        String targetPath;
+
+        if (sentSuccessfully) {
+            // Éxito: Guardar en 'archive'
+            targetPath = String(ARCHIVE_ENVIRONMENTAL_DIR) + "/" + filename;
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println("[EnvTasks] Archiving environmental data to: " + targetPath);
+            #endif
+        } else {
+            // Fallo: Guardar en 'pending' para reintentar luego
+            targetPath = String(AMBIENT_PENDING_DIR) + "/" + filename;
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println("[EnvTasks] Saving environmental data to pending: " + targetPath);
+            #endif
+        }
+        
+        // Escribir el archivo JSON en la ruta decidida
+        if (!sdMgr.writeTextFile(targetPath, envDataJsonString)) {
+            #ifdef ENABLE_DEBUG_SERIAL
+                Serial.println("[EnvTasks] Failed to write environmental data to SD card at: " + targetPath);
+            #endif
+            ErrorLogger::logToSdOnly(sdMgr, timeMgr, LogLevel::ERROR, "Failed to write env data to " + targetPath, internalTempForLog);
+        }
+    } else {
+        #ifdef ENABLE_DEBUG_SERIAL
+            Serial.println("[EnvTasks] SD card not available, cannot archive or save pending environmental data.");
+        #endif
+        // Si no hay SD, el log de "falla de envío" (si ocurrió) ya se intentó
+        // enviar a la API, pero el log local falla.
+        ErrorLogger::logToSdOnly(sdMgr, timeMgr, LogLevel::WARNING, "SD card not available, could not save env data.", internalTempForLog);
     }
 
 
@@ -267,13 +255,11 @@ bool performEnvironmentTasks_Env(SDManager& sdMgr, TimeManager& timeMgr, Config&
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[EnvTasks] Error: Failed to send environment data to the server (data saved to pending)."));
         #endif
-
-        return false; 
+        return false; // Retorna 'false' si el envío falló (aunque se haya guardado en pending)
     }
 
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("[EnvTasks] Environment data sent successfully to the server and archived."));
     #endif
-
-    return true;
+    return true; // Retorna 'true' solo si el envío fue exitoso
 }

@@ -1,0 +1,157 @@
+/* Estilo general */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: #f4f7f6;
+    color: #333;
+    margin: 0;
+    padding: 20px;
+    line-height: 1.6;
+}
+
+main {
+    max-width: 800px;
+    margin: 0 auto;
+    background-color: #ffffff;
+    padding: 25px;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+}
+
+h1 {
+    color: #005a9c;
+    border-bottom: 2px solid #eee;
+    padding-bottom: 10px;
+}
+
+h2 {
+    color: #333;
+    border-bottom: 1px solid #eee;
+    padding-bottom: 5px;
+}
+
+/* Formularios */
+form {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+fieldset {
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    padding: 20px;
+    margin: 0;
+}
+
+legend {
+    font-weight: 600;
+    color: #005a9c;
+    padding: 0 10px;
+}
+
+details {
+    border: 1px solid #ddd;
+    border-radius: 5px;
+}
+details > summary {
+    padding: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    background-color: #f9f9f9;
+}
+details[open] > fieldset {
+    border: none;
+    border-top: 1px solid #ddd;
+}
+
+.form-group {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 15px;
+}
+
+.form-group label {
+    font-weight: 500;
+    margin-bottom: 5px;
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"],
+select {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    box-sizing: border-box; /* Asegura que el padding no afecte el ancho */
+}
+
+/* Botones */
+button {
+    background-color: #007bff;
+    color: white;
+    padding: 12px 20px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: 600;
+    transition: background-color 0.2s;
+}
+
+button:hover {
+    background-color: #0056b3;
+}
+
+button#refresh-logs-btn {
+    background-color: #6c757d;
+    padding: 8px 15px;
+    font-size: 14px;
+    margin-left: 10px;
+}
+button#refresh-logs-btn:hover {
+    background-color: #5a6268;
+}
+
+/* Sección de Logs */
+.logs-section .form-group {
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+}
+.logs-section label {
+    margin-bottom: 0;
+}
+.logs-section select {
+    flex: 1; /* El select toma el espacio disponible */
+}
+
+pre#log-content {
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+    padding: 15px;
+    border-radius: 4px;
+    border: 1px solid #333;
+    overflow-x: auto; /* Scroll horizontal si el log es muy ancho */
+    white-space: pre-wrap; /* Mantiene el formato pero ajusta línea */
+    word-wrap: break-word; /* Rompe palabras largas */
+    min-height: 100px;
+    max-height: 400px;
+    overflow-y: auto; /* Scroll vertical */
+}
+
+/* Mensajes de estado */
+#status-message {
+    text-align: center;
+    font-weight: 600;
+    padding: 10px;
+    border-radius: 4px;
+}
+#status-message.success {
+    background-color: #d4edda;
+    color: #155724;
+}
+#status-message.error {
+    background-color: #f8d7da;
+    color: #721c24;
+}

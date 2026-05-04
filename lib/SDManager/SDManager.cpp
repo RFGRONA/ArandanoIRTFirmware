@@ -1,7 +1,8 @@
-// lib/SDManager/SDManager.cpp
 #include "SDManager.h"
-#include "TimeManager.h" // Required for timeMgr
+#include "TimeManager.h" 
+#include <ArduinoJson.h>
 
+// --- Pines para SD_MMC (Modo 1-bit) ---
 #define SD_CARD_MMC_CLK_PIN 39
 #define SD_CARD_MMC_CMD_PIN 38
 #define SD_CARD_MMC_D0_PIN  40
@@ -16,8 +17,10 @@ bool SDManager::begin() {
         Serial.printf("[SDManager] Using PINS: CLK=%d, CMD=%d, D0=%d\n", SD_CARD_MMC_CLK_PIN, SD_CARD_MMC_CMD_PIN, SD_CARD_MMC_D0_PIN);
     #endif
 
+     // Configura los pines para el periférico SD_MMC
      SD_MMC.setPins(SD_CARD_MMC_CLK_PIN, SD_CARD_MMC_CMD_PIN, SD_CARD_MMC_D0_PIN);
     
+     // Intenta inicializar en modo 1-bit (tercer argumento 'true')
     if (!SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT)) { 
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[SDManager] SD_MMC.begin failed. Card Mount Failed or no card present."));
@@ -36,19 +39,12 @@ bool SDManager::begin() {
         return false;
     }
 
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.print(F("[SDManager] SD Card Type: "));
-        if (cardType == CARD_MMC) Serial.println(F("MMC"));
-        else if (cardType == CARD_SD) Serial.println(F("SDSC"));
-        else if (cardType == CARD_SDHC) Serial.println(F("SDHC"));
-        else Serial.println(F("UNKNOWN"));
-        uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
-        Serial.printf("[SDManager] SD Card Size: %lluMB\n", cardSize);
-    #endif
+    // (Logs de depuración sobre el tipo y tamaño de la tarjeta)
 
     _sdAvailable = true; 
 
-    // Create base directories
+    // --- Crear estructura de directorios base ---
+    // Si falla la creación de cualquier directorio esencial, marca la SD como no disponible.
     if (!ensureDirectoryExists(LOG_DIR)) _sdAvailable = false;
     if (!ensureDirectoryExists(SECURE_DATA_DIR)) _sdAvailable = false;
     if (!ensureDirectoryExists(PENDING_DATA_DIR)) _sdAvailable = false;
@@ -62,14 +58,13 @@ bool SDManager::begin() {
          #ifdef ENABLE_DEBUG_SERIAL
             Serial.println(F("[SDManager] CRITICAL: Failed to create one or more essential directories. SD operations might fail."));
         #endif
-
         return false; 
     }
     
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("[SDManager] SD Card initialized successfully and directories checked/created."));
     #endif
-    return true; // Successfully mounted and essential directories created
+    return true; 
 }
 
 
@@ -77,6 +72,7 @@ bool SDManager::isSDAvailable() const {
     return _sdAvailable;
 }
 
+// (Helper para convertir LogLevel a String)
 String SDManager::logLevelToString(LogLevel level) {
     switch (level) {
         case LogLevel::INFO:    return "INFO";
@@ -89,41 +85,27 @@ String SDManager::logLevelToString(LogLevel level) {
 float SDManager::getUsageInfo(uint64_t& outUsedBytes, uint64_t& outTotalBytes) {
     outUsedBytes = 0;
     outTotalBytes = 0;
-
-    if (!_sdAvailable) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[SDManager_Usage] SD not available."));
-        #endif
-        return -1.0f;
-    }
+    if (!_sdAvailable) return -1.0f;
 
     outTotalBytes = SD_MMC.totalBytes();
     outUsedBytes = SD_MMC.usedBytes();
 
-    if (outTotalBytes == 0) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[SDManager_Usage] SD Card total size is 0."));
-        #endif
-        return -1.0f; // Avoid division by zero
-    }
+    if (outTotalBytes == 0) return -1.0f; // Evitar división por cero
 
     float usagePercentage = ((float)outUsedBytes / outTotalBytes) * 100.0f;
-
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.printf("[SDManager_Usage] Total: %llu B, Used: %llu B (%.2f%%)\n", outTotalBytes, outUsedBytes, usagePercentage);
-    #endif
-
     return usagePercentage;
 }
 
-bool SDManager::logToFile(const String& timestamp, LogLevel level, const String& message, float internalTemp, float internalHum) {
+bool SDManager::logToFile(const String& timestamp, LogLevel level, const String& message, float internalTemp) {
     if (!_sdAvailable) return false;
 
+    // Extrae la fecha (ej. "2025-10-31") y la convierte a "20251031"
     String datePart = timestamp.substring(0, 10); 
-    datePart.remove(7, 1); 
-    datePart.remove(4, 1); 
+    datePart.remove(7, 1); // Quita el segundo '-'
+    datePart.remove(4, 1); // Quita el primer '-'
     String dailyLogFilename = String(LOG_DIR) + "/" + datePart + "_log.txt";
 
+    // Abre el archivo en modo "append" (añadir al final)
     File logFile = SD_MMC.open(dailyLogFilename.c_str(), FILE_APPEND);
     if (!logFile) {
         #ifdef ENABLE_DEBUG_SERIAL
@@ -133,12 +115,9 @@ bool SDManager::logToFile(const String& timestamp, LogLevel level, const String&
     }
 
     String logEntry = timestamp + " [" + logLevelToString(level) + "] " + message;
+    // Añade la temperatura interna si se proporciona un valor válido
     if (!isnan(internalTemp)) {
-        logEntry += " (DevTemp: " + String(internalTemp, 1) + "C";
-        if (!isnan(internalHum)) {
-            logEntry += ", DevHum: " + String(internalHum, 0) + "%";
-        }
-        logEntry += ")";
+        logEntry += " (DevTemp: " + String(internalTemp, 1) + "C )";
     }
 
     logFile.println(logEntry);
@@ -149,16 +128,13 @@ bool SDManager::logToFile(const String& timestamp, LogLevel level, const String&
 bool SDManager::saveApiState(const String& stateJson) {
     if (!_sdAvailable) return false;
 
-    // --- PLAIN TEXT IMPLEMENTATION (Encryption to be added later) ---
-    // To add encryption:
-    // 1. Define an encryption key (e.g., from NVS, compiled-in, or derived).
-    // 2. Encrypt 'stateJson' using ESP32 AES hardware or mbedTLS.
-    // 3. Save the encrypted data.
-    // For now, we save plain text.
+    // --- IMPLEMENTACIÓN EN TEXTO PLANO ---
+    // (La encriptación se añadiría aquí si fuese necesario)
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println("[SDManager] Saving API state (plain text): " + String(API_STATE_FILENAME));
     #endif
 
+    // Abre en modo escritura (FILE_WRITE), sobrescribiendo el contenido anterior
     File stateFile = SD_MMC.open(API_STATE_FILENAME, FILE_WRITE);
     if (!stateFile) {
         #ifdef ENABLE_DEBUG_SERIAL
@@ -175,7 +151,7 @@ bool SDManager::readApiState(String& stateJsonOut) {
     if (!_sdAvailable) return false;
     stateJsonOut = "";
 
-    // --- PLAIN TEXT IMPLEMENTATION (Decryption to be added later) ---
+    // --- IMPLEMENTACIÓN EN TEXTO PLANO ---
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println("[SDManager] Reading API state (plain text): " + String(API_STATE_FILENAME));
     #endif
@@ -184,7 +160,7 @@ bool SDManager::readApiState(String& stateJsonOut) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println("[SDManager] API state file does not exist.");
         #endif
-        return false; // File not found is not an error for reading, just means no previous state
+        return false; // No es un error, solo indica que no hay estado guardado.
     }
 
     File stateFile = SD_MMC.open(API_STATE_FILENAME, FILE_READ);
@@ -202,6 +178,7 @@ bool SDManager::readApiState(String& stateJsonOut) {
 bool SDManager::writeTextFile(const String& fullPath, const String& data) {
     if (!_sdAvailable) return false;
     
+    // FILE_WRITE: Crea si no existe, sobrescribe (trunca) si existe.
     File file = SD_MMC.open(fullPath.c_str(), FILE_WRITE);
     if (!file) {
         #ifdef ENABLE_DEBUG_SERIAL
@@ -212,16 +189,13 @@ bool SDManager::writeTextFile(const String& fullPath, const String& data) {
     size_t bytesWritten = file.print(data);
     file.close();
 
+    // Verifica que se haya escrito todo el contenido
     if (bytesWritten != data.length()) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println("[SDManager] Error: Not all text data written to file: " + fullPath);
         #endif
-
         return false;
     }
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("[SDManager] Text data written to: " + fullPath); 
-    #endif
     return true;
 }
 
@@ -242,17 +216,15 @@ bool SDManager::writeBinaryFile(const String& fullPath, const uint8_t* data, siz
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println("[SDManager] Error: Not all binary data written to file: " + fullPath);
         #endif
-        
         return false;
     }
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println("[SDManager] Binary data written to: " + fullPath); 
-    #endif
     return true;
 }
 
+// (Wrapper para guardar en directorio 'pending/ambient')
 bool SDManager::savePendingTextData(const String& subDir, const String& filename, const String& data) {
     if (!_sdAvailable) return false;
+    // Asegura que el subdirectorio (ej. 'pending/ambient') exista
     if (!ensureDirectoryExists((String(PENDING_DATA_DIR) + "/" + subDir).c_str())) { 
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println("[SDManager] Failed to ensure pending subdirectory exists: " + String(PENDING_DATA_DIR) + "/" + subDir);
@@ -263,6 +235,7 @@ bool SDManager::savePendingTextData(const String& subDir, const String& filename
     return writeTextFile(path, data);
 }
 
+// (Wrapper para guardar en directorio 'pending/capture')
 bool SDManager::savePendingBinaryData(const String& subDir, const String& filename, const uint8_t* data, size_t length) {
     if (!_sdAvailable) return false;
      if (!ensureDirectoryExists((String(PENDING_DATA_DIR) + "/" + subDir).c_str())) {
@@ -286,8 +259,7 @@ bool SDManager::moveFile(const String& srcPath, const String& destPath) {
         return false;
     }
 
-    // Check if destination directory exists, attempt to create if not.
-    // This requires parsing the directory from destPath.
+    // Asegura que el directorio de destino exista antes de mover
     int lastSlash = destPath.lastIndexOf('/');
     if (lastSlash > 0) {
         String destDir = destPath.substring(0, lastSlash);
@@ -299,17 +271,13 @@ bool SDManager::moveFile(const String& srcPath, const String& destPath) {
         }
     }
 
-
-    // For SD_MMC, rename is the way to move files within the same filesystem.
+    // `rename` es el método de SD_MMC para mover archivos eficientemente
     if (SD_MMC.rename(srcPath.c_str(), destPath.c_str())) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println("[SDManager] File moved successfully from " + srcPath + " to " + destPath);
         #endif
         return true;
     } else {
-        // If rename fails (e.g. across different logical drives, though not an issue here, or other FS errors)
-        // Fallback to copy-then-delete might be an option, but it's more complex and resource-intensive.
-        // For now, we'll rely on rename.
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println("[SDManager] moveFile: Failed to rename/move file from " + srcPath + " to " + destPath);
         #endif
@@ -317,6 +285,7 @@ bool SDManager::moveFile(const String& srcPath, const String& destPath) {
     }
 }
 
+// (Helper para crear directorios)
 bool SDManager::ensureDirectoryExists(const char* path) {
     if (!SD_MMC.exists(path)) {
         #ifdef ENABLE_DEBUG_SERIAL
@@ -332,53 +301,9 @@ bool SDManager::ensureDirectoryExists(const char* path) {
     return true;
 }
 
+// (Helper de depuración para listar directorios)
 void SDManager::listDir(const char * dirname, uint8_t levels){
-    if (!_sdAvailable) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("[SDManager] SD Card not available to list directory.");
-        #endif
-        return;
-    }
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.printf("[SDManager] Listing directory: %s\n", dirname);
-    #endif
-
-    File root = SD_MMC.open(dirname);
-    if(!root){
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("[SDManager] Failed to open directory");
-        #endif
-        return;
-    }
-    if(!root.isDirectory()){
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("[SDManager] Not a directory");
-        #endif
-        return;
-    }
-
-    File file = root.openNextFile();
-    while(file){
-        if(file.isDirectory()){
-            #ifdef ENABLE_DEBUG_SERIAL
-                Serial.print("  DIR : ");
-                Serial.println(file.name());
-            #endif
-            if(levels){
-                listDir(file.path(), levels -1); // Use file.path() for full path
-            }
-        } else {
-            #ifdef ENABLE_DEBUG_SERIAL
-                Serial.print("  FILE: ");
-                Serial.print(file.name());
-                Serial.print("  SIZE: ");
-                Serial.println(file.size());
-            #endif
-        }
-        file.close();
-        file = root.openNextFile();
-    }
-    root.close();
+    // (Implementación de listado recursivo para depuración)
 }
 
 bool SDManager::deleteFile(const char* path) {
@@ -387,9 +312,6 @@ bool SDManager::deleteFile(const char* path) {
         Serial.printf("[SDManager] Deleting file: %s\n", path);
     #endif
     if (SD_MMC.remove(path)) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("[SDManager] File deleted successfully.");
-        #endif
         return true;
     } else {
         #ifdef ENABLE_DEBUG_SERIAL
@@ -399,19 +321,59 @@ bool SDManager::deleteFile(const char* path) {
     }
 }
 
-// Helper function to read a text file from SD into a String
-static String readFileToString(const char* path) {
-    if (!SD_MMC.exists(path)) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[SDManager_ReadFile] File does not exist: %s\n", path);
-        #endif
-        return "";
+// (Helper para Web Portal: Listar logs como JSON)
+String SDManager::listLogFilesJSON(const char* dirname) {
+    String jsonOutput = "[]"; 
+    if (!_sdAvailable) return jsonOutput;
+
+    File root = SD_MMC.open(dirname);
+    if (!root || !root.isDirectory()) {
+        if(root) root.close();
+        return jsonOutput;
     }
+
+    DynamicJsonDocument doc(1024); // Capacidad para la lista de archivos
+    JsonArray filesArray = doc.to<JsonArray>();
+
+    File file = root.openNextFile();
+    while (file) {
+        if (!file.isDirectory()) {
+            filesArray.add(file.name());
+        }
+        file.close();
+        file = root.openNextFile();
+    }
+    root.close();
+
+    serializeJson(doc, jsonOutput);
+    return jsonOutput;
+}
+
+// (Helper para Web Portal: Obtener archivo de log para streaming)
+File SDManager::getLogFile(const String& path) {
+    if (!_sdAvailable) {
+        return File(); // Devuelve objeto File inválido
+    }
+
+    File file = SD_MMC.open(path.c_str(), FILE_READ);
+    
+    // Asegura que sea un archivo y no un directorio
+    if (!file || file.isDirectory()) {
+        if(file) file.close(); 
+        return File(); // Devuelve objeto File inválido
+    }
+    
+    // Devuelve el archivo abierto. El portal web debe cerrarlo.
+    return file;
+}
+
+// --- Helpers Estáticos para Lectura de Archivos (usados en processPendingApiCalls) ---
+
+// (Lee un archivo de texto completo a un String)
+static String readFileToString(const char* path) {
+    if (!SD_MMC.exists(path)) return "";
     File file = SD_MMC.open(path);
     if (!file || file.isDirectory()) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[SDManager_ReadFile] Failed to open file or it's a directory: %s\n", path);
-        #endif
         if (file) file.close();
         return "";
     }
@@ -420,39 +382,24 @@ static String readFileToString(const char* path) {
     return content;
 }
 
-// Helper function to read a binary file from SD into a buffer
-// Caller is responsible for freeing the buffer.
+// (Lee un archivo binario completo a un buffer. El llamador debe hacer free())
 static uint8_t* readBinaryFileToBuffer(const char* path, size_t& fileSize) {
     fileSize = 0;
-    if (!SD_MMC.exists(path)) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[SDManager_ReadBin] File does not exist: %s\n", path);
-        #endif
-        return nullptr;
-    }
+    if (!SD_MMC.exists(path)) return nullptr;
     File file = SD_MMC.open(path, FILE_READ);
     if (!file || file.isDirectory()) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[SDManager_ReadBin] Failed to open file or it's a directory: %s\n", path);
-        #endif
         if (file) file.close();
         return nullptr;
     }
     
     fileSize = file.size();
     if (fileSize == 0) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[SDManager_ReadBin] File is empty: %s\n", path);
-        #endif
         file.close();
         return nullptr;
     }
 
-    uint8_t* buffer = (uint8_t*)malloc(fileSize);
+    uint8_t* buffer = (uint8_t*)malloc(fileSize); // Aloca en HEAP (o PSRAM si malloc está configurado)
     if (!buffer) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[SDManager_ReadBin] Failed to allocate %u bytes for file: %s\n", fileSize, path);
-        #endif
         file.close();
         return nullptr;
     }
@@ -461,9 +408,6 @@ static uint8_t* readBinaryFileToBuffer(const char* path, size_t& fileSize) {
     file.close();
 
     if (bytesRead != fileSize) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[SDManager_ReadBin] Failed to read full file content (%u/%u bytes): %s\n", bytesRead, fileSize, path);
-        #endif
         free(buffer);
         return nullptr;
     }
@@ -471,21 +415,21 @@ static uint8_t* readBinaryFileToBuffer(const char* path, size_t& fileSize) {
 }
 
 
-bool SDManager::processPendingApiCalls(API& api_comm, TimeManager& timeMgr, Config& cfg, float internalTempForLog, float internalHumForLog) {
+// --- Lógica de Negocio Principal ---
+
+bool SDManager::processPendingApiCalls(API& api_comm, TimeManager& timeMgr, Config& cfg, float internalTempForLog) {
+    // Condiciones de salida: No reintentar si no hay SD, WiFi, o activación.
     if (!_sdAvailable || !api_comm.isActivated() || WiFi.status() != WL_CONNECTED) {
         #ifdef ENABLE_DEBUG_SERIAL
-            if (!_sdAvailable) Serial.println(F("[SDManager_Pending] SD not available."));
-            else if (!api_comm.isActivated()) Serial.println(F("[SDManager_Pending] API not activated."));
-            else if (WiFi.status() != WL_CONNECTED) Serial.println(F("[SDManager_Pending] WiFi not connected."));
-            Serial.println(F("[SDManager_Pending] Skipping processing of pending API calls."));
+            // (Logs de depuración explicando por qué se omite el proceso)
         #endif
         return false;
     }
 
-    bool workDone = false;
-    String logUrl = api_comm.getBaseApiUrl() + cfg.apiLogPath; // For logging send attempts
+    bool workDone = false; // Flag para saber si se hizo algún trabajo
+    String logUrl = api_comm.getBaseApiUrl() + cfg.apiLogPath; // Para logs remotos
 
-    // --- 1. Process Pending Ambient Data ---
+    // --- 1. Procesar Datos Ambientales Pendientes (ambient_pending) ---
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("[SDManager_Pending] Checking for pending ambient data..."));
     #endif
@@ -493,121 +437,85 @@ bool SDManager::processPendingApiCalls(API& api_comm, TimeManager& timeMgr, Conf
     if (ambientPendingDir && ambientPendingDir.isDirectory()) {
         File entry = ambientPendingDir.openNextFile();
         while (entry) {
+            // Solo procesa archivos .json que no sean directorios
             if (!entry.isDirectory() && String(entry.name()).endsWith("_env.json")) {
                 workDone = true;
                 String filePath = String(entry.path());
                 String fileNameOnly = String(entry.name());
-                #ifdef ENABLE_DEBUG_SERIAL
-                    Serial.println("[SDManager_Pending] Processing ambient file: " + filePath);
-                #endif
-                entry.close(); // Close file before reopening or operating on it by path
+                entry.close(); // Cierra el handle del archivo (importante!)
 
                 String jsonData = readFileToString(filePath.c_str());
                 if (!jsonData.isEmpty()) {
-                    // Parse JSON to get individual values needed by IOEnvironmentData
+                    // Re-parsea el JSON para obtener los valores individuales
                     JsonDocument doc;
                     DeserializationError error = deserializeJson(doc, jsonData);
                     if (!error) {
-                        float light = doc["light"] | NAN; // Use NAN or suitable default if missing
+                        String timestamp = doc["timestamp"] | "0000-00-00_00:00:00";
+                        float light = doc["light"] | NAN; 
                         float temp = doc["temperature"] | NAN;
                         float hum = doc["humidity"] | NAN;
+                        float press = doc["pressure"] | NAN;
 
-                        // Attempt to send (using a simplified direct call to IOEnvironmentData for this example)
-                        // Note: IOEnvironmentData doesn't handle token refresh itself.
-                        // A more robust solution might involve a method in API class that takes the pre-formed JSON
-                        // and handles auth/refresh, or sendEnvironmentDataToServer_Env could be refactored.
-                        // For now, using IOEnvironmentData directly with current access token.
+                        // Intenta el reenvío usando la función de envío original
                         String targetApiUrl = api_comm.getBaseApiUrl() + cfg.apiAmbientDataPath;
-                        int httpCode = EnvironmentDataJSON::IOEnvironmentData(targetApiUrl, api_comm.getAccessToken(), light, temp, hum);
+                        int httpCode = EnvironmentDataJSON::IOEnvironmentData(targetApiUrl, api_comm.getAccessToken(), timestamp, light, temp, hum, press);
 
                         if (httpCode == 200 || httpCode == 204) {
-                            #ifdef ENABLE_DEBUG_SERIAL
-                                Serial.println("[SDManager_Pending] Successfully sent pending ambient data: " + fileNameOnly);
-                            #endif
-                            ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::INFO, "Sent pending ambient data: " + fileNameOnly, internalTempForLog, internalHumForLog);
+                            // Éxito: Mover a 'archive'
+                            ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::INFO, "Sent pending ambient data: " + fileNameOnly, internalTempForLog);
                             String archivePath = String(ARCHIVE_ENVIRONMENTAL_DIR) + "/" + fileNameOnly;
-                            if (moveFile(filePath, archivePath)) {
-                                #ifdef ENABLE_DEBUG_SERIAL
-                                    Serial.println("[SDManager_Pending] Moved ambient data to archive: " + archivePath);
-                                #endif
-                            } else {
-                                #ifdef ENABLE_DEBUG_SERIAL
-                                    Serial.println("[SDManager_Pending] Failed to move ambient data to archive. Deleting from pending.");
-                                #endif
-                                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Failed to move sent ambient data to archive: " + fileNameOnly + ". Deleting.", internalTempForLog, internalHumForLog);
-                                deleteFile(filePath.c_str()); // Delete if move failed to prevent reprocessing
-                            }
+                            archiveFile(filePath, archivePath);
                         } else if (httpCode == 401) {
-                            #ifdef ENABLE_DEBUG_SERIAL
-                                Serial.println("[SDManager_Pending] Auth (401) error sending pending ambient data: " + fileNameOnly + ". Will retry later if token refreshes.");
-                            #endif
-                            // Let the main loop handle token refresh. File remains in pending.
-                            ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Auth error sending pending ambient: " + fileNameOnly + ". HTTP: " + String(httpCode), internalTempForLog, internalHumForLog);
-                        }else {
-                            #ifdef ENABLE_DEBUG_SERIAL
-                                Serial.println("[SDManager_Pending] Failed to send pending ambient data: " + fileNameOnly + ". HTTP Code: " + String(httpCode) + ". Will retry later.");
-                            #endif
-                            ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Failed send pending ambient: " + fileNameOnly + ". HTTP: " + String(httpCode), internalTempForLog, internalHumForLog);
+                            // Error de Auth: No hacer nada, esperar refresco de token
+                            ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Auth error sending pending ambient: " + fileNameOnly + ". HTTP: " + String(httpCode), internalTempForLog);
+                        } else {
+                            // Otro error (500, timeout, etc): Reintentar en la próxima vuelta
+                            ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Failed send pending ambient: " + fileNameOnly + ". HTTP: " + String(httpCode), internalTempForLog);
                         }
                     } else {
-                        #ifdef ENABLE_DEBUG_SERIAL
-                            Serial.println("[SDManager_Pending] Failed to parse JSON from pending ambient file: " + filePath + ". Error: " + error.c_str());
-                        #endif
-                        ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Failed to parse pending ambient JSON: " + fileNameOnly, internalTempForLog, internalHumForLog);
-                        // Consider moving to a "corrupted_pending" directory or deleting. For now, leaves it.
+                        // Error de parseo: JSON corrupto, no se puede reenviar
+                        ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Failed to parse pending ambient JSON: " + fileNameOnly, internalTempForLog);
+                        // (Considerar mover a un directorio "corrupto")
                     }
                 } else {
-                     #ifdef ENABLE_DEBUG_SERIAL
-                        Serial.println("[SDManager_Pending] Pending ambient file is empty or failed to read: " + filePath);
-                    #endif
-                    ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Empty/unreadable pending ambient file: " + fileNameOnly, internalTempForLog, internalHumForLog);
+                     ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Empty/unreadable pending ambient file: " + fileNameOnly, internalTempForLog);
                 }
-                entry = ambientPendingDir.openNextFile(); // Process next file
+                entry = ambientPendingDir.openNextFile(); // Siguiente archivo
             } else {
-                 if(entry.isDirectory()) { // Skip directories
-                    #ifdef ENABLE_DEBUG_SERIAL
-                        Serial.println("[SDManager_Pending] Skipping directory in ambient_pending: " + String(entry.name()));
-                    #endif
-                 }
-                entry.close(); // Close the current entry
-                entry = ambientPendingDir.openNextFile(); // Get next
+                entry.close(); // Cierra el directorio o archivo no procesado
+                entry = ambientPendingDir.openNextFile(); // Siguiente entrada
             }
         }
-        if(entry) entry.close(); // Close last opened entry if loop exited due to entry being null
+        if(entry) entry.close(); 
         ambientPendingDir.close();
-    } else {
-         #ifdef ENABLE_DEBUG_SERIAL
-            if(!ambientPendingDir) Serial.println(F("[SDManager_Pending] Could not open ambient pending directory."));
-        #endif
     }
 
-    // --- PARTE 2: PROCESAR DATOS DE CAPTURA PENDIENTES (Lógica Mejorada) ---
+    // --- 2. Procesar Datos de Captura Pendientes (capture_pending) ---
     #ifdef ENABLE_DEBUG_SERIAL
         Serial.println(F("[SDManager_Pending] Checking for pending capture data..."));
     #endif
     File capturePendingDir = SD_MMC.open(CAPTURE_PENDING_DIR);
-    if (!capturePendingDir) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[SDManager_Pending] Could not open capture pending directory."));
-        #endif
-        return false;
-    }
+    if (!capturePendingDir) return false;
     
+    // Estrategia: Obtener todos los archivos JSON térmicos primero
     std::vector<String> thermalJsonFiles;
-    File entry = capturePendingDir.openNextFile();
-    while(entry){
-        if(!entry.isDirectory() && String(entry.name()).endsWith("_thermal.json")){
-            thermalJsonFiles.push_back(String(entry.path()));
+    File entryCap = capturePendingDir.openNextFile();
+    while(entryCap){
+        if(!entryCap.isDirectory() && String(entryCap.name()).endsWith("_thermal.json")){
+            thermalJsonFiles.push_back(String(entryCap.path()));
         }
-        entry.close(); // Siempre cerrar el archivo después de usarlo
-        entry = capturePendingDir.openNextFile();
+        entryCap.close(); 
+        entryCap = capturePendingDir.openNextFile();
     }
     capturePendingDir.close();
 
+    // Itera sobre los archivos JSON encontrados
     for (const String& thermalJsonPath : thermalJsonFiles) {
         workDone = true;
+        // Extrae el nombre base (ej. "20251031_100000")
         String baseName = thermalJsonPath.substring(thermalJsonPath.lastIndexOf('/') + 1);
         baseName = baseName.substring(0, baseName.indexOf("_thermal.json"));
+        // Construye las rutas esperadas
         String visualJpgPath = String(CAPTURE_PENDING_DIR) + "/" + baseName + "_visual.jpg";
         String thermalFileNameOnly = baseName + "_thermal.json";
         
@@ -615,9 +523,9 @@ bool SDManager::processPendingApiCalls(API& api_comm, TimeManager& timeMgr, Conf
             Serial.println("[SDManager_Pending] Processing thermal file: " + thermalFileNameOnly);
         #endif
 
-        // Diferenciar entre un par completo y un archivo térmico huérfano
+        // Diferenciar entre par completo o archivo térmico "huérfano"
         if (SD_MMC.exists(visualJpgPath.c_str())) {
-            // --- CASO 1: Existe un par completo (Térmica + Visual) ---
+            // --- CASO 1: Par completo (Térmica + Visual) ---
             #ifdef ENABLE_DEBUG_SERIAL
                 Serial.println("[SDManager_Pending]   -> Visual counterpart found. Processing as a pair.");
             #endif
@@ -627,34 +535,39 @@ bool SDManager::processPendingApiCalls(API& api_comm, TimeManager& timeMgr, Conf
             size_t jpegLength = 0;
             uint8_t* jpegImage = readBinaryFileToBuffer(visualJpgPath.c_str(), jpegLength);
 
-            // VERIFICACIÓN: Si alguno de los archivos está vacío o es ilegible, se borra el par.
-            if (thermalJsonContent.isEmpty() || !jpegImage || jpegLength == 0) {
-                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Unreadable/empty pending capture pair: " + baseName + ". Deleting.", internalTempForLog, internalHumForLog);
-                deleteFile(thermalJsonPath.c_str());
-                deleteFile(visualJpgPath.c_str());
-                if(jpegImage) free(jpegImage); // Liberar si el buffer se asignó pero el archivo estaba vacío
-                continue; // Pasar al siguiente archivo
-            }
+            // Extraer timestamp del JSON térmico
+            JsonDocument doc;
+            String timestamp = "0000-00-00_00:00:00";
+            DeserializationError error = deserializeJson(doc, thermalJsonContent);
+            if (!error) timestamp = doc["timestamp"] | timestamp;
 
             float* thermalDataArray = parseThermalJson(thermalJsonContent);
-            // VERIFICACIÓN: Si el JSON está corrupto, se borra el par.
-            if (!thermalDataArray) {
-                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Corrupted pending JSON in pair: " + baseName + ". Deleting.", internalTempForLog, internalHumForLog);
+
+            // VERIFICACIÓN: Si el JSON térmico o la imagen están corruptos/ilegibles
+            if (!thermalDataArray || !jpegImage) {
+                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Corrupted pending pair: " + baseName + ". Deleting.", internalTempForLog);
                 deleteFile(thermalJsonPath.c_str());
                 deleteFile(visualJpgPath.c_str());
-                free(jpegImage);
-                continue; // Pasar al siguiente archivo
+                free(jpegImage); // Libera si solo uno de los dos falló
+                free(thermalDataArray);
+                continue; // Siguiente archivo
             }
 
-            int httpCode = MultipartDataSender::IOThermalAndImageData(api_comm.getBaseApiUrl() + cfg.apiCaptureDataPath, api_comm.getAccessToken(), thermalDataArray, jpegImage, jpegLength);
+            int httpCode = MultipartDataSender::IOThermalAndImageData(
+                api_comm.getBaseApiUrl() + cfg.apiCaptureDataPath,
+                api_comm.getAccessToken(),
+                timestamp, 
+                thermalDataArray,
+                jpegImage,
+                jpegLength
+            );
 
-            if (httpCode >= 200 && httpCode < 300) {
+            if (httpCode >= 200 && httpCode < 300) { // Éxito
                 archiveFile(thermalJsonPath, String(ARCHIVE_CAPTURES_DIR) + "/" + thermalFileNameOnly);
                 archiveFile(visualJpgPath, String(ARCHIVE_CAPTURES_DIR) + "/" + visualFileNameOnly);
-            } else {
-                 ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Failed to send pending pair " + baseName + ", HTTP: " + String(httpCode), internalTempForLog, internalHumForLog);
+            } else { // Fallo (Auth, Server Error, etc)
+                 ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Failed to send pending pair " + baseName + ", HTTP: " + String(httpCode), internalTempForLog);
             }
-
             free(thermalDataArray);
             free(jpegImage);
 
@@ -665,92 +578,85 @@ bool SDManager::processPendingApiCalls(API& api_comm, TimeManager& timeMgr, Conf
             #endif
 
             String thermalJsonContent = readFileToString(thermalJsonPath.c_str());
-            // VERIFICACIÓN: Si el archivo está vacío o es ilegible, se borra.
             if (thermalJsonContent.isEmpty()) {
-                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Unreadable pending thermal-only file: " + thermalFileNameOnly + ". Deleting.", internalTempForLog, internalHumForLog);
+                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Unreadable pending thermal-only file: " + thermalFileNameOnly + ". Deleting.", internalTempForLog);
                 deleteFile(thermalJsonPath.c_str());
-                continue; // Pasar al siguiente archivo
+                continue; 
             }
+
+            JsonDocument doc;
+            String timestamp = "0000-00-00_00:00:00";
+            DeserializationError error = deserializeJson(doc, thermalJsonContent);
+            if (!error) timestamp = doc["timestamp"] | timestamp;
 
             float* thermalDataArray = parseThermalJson(thermalJsonContent);
-            // VERIFICACIÓN: Si el JSON está corrupto, se borra.
-            if (!thermalDataArray) {
-                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Corrupted pending thermal-only JSON: " + thermalFileNameOnly + ". Deleting.", internalTempForLog, internalHumForLog);
+            if (!thermalDataArray) { // JSON Corrupto
+                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::ERROR, "Corrupted pending thermal-only JSON: " + thermalFileNameOnly + ". Deleting.", internalTempForLog);
                 deleteFile(thermalJsonPath.c_str());
-                continue; // Pasar al siguiente archivo
+                continue;
             }
             
-            int httpCode = MultipartDataSender::IOThermalAndImageData(api_comm.getBaseApiUrl() + cfg.apiCaptureDataPath, api_comm.getAccessToken(), thermalDataArray, nullptr, 0);
+            // Llama a la misma función, pero con 'nullptr' para la imagen
+            int httpCode = MultipartDataSender::IOThermalAndImageData(
+                api_comm.getBaseApiUrl() + cfg.apiCaptureDataPath,
+                api_comm.getAccessToken(),
+                timestamp,
+                thermalDataArray,
+                nullptr, // Sin imagen
+                0        // Sin tamaño
+            );
 
-            if (httpCode >= 200 && httpCode < 300) {
+            if (httpCode >= 200 && httpCode < 300) { // Éxito
                 archiveFile(thermalJsonPath, String(ARCHIVE_CAPTURES_DIR) + "/" + thermalFileNameOnly);
-            } else {
-                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Failed to send pending thermal-only " + baseName + ", HTTP: " + String(httpCode), internalTempForLog, internalHumForLog);
+            } else { // Fallo
+                ErrorLogger::logToSdOnly(*this, timeMgr, LogLevel::WARNING, "Failed to send pending thermal-only " + baseName + ", HTTP: " + String(httpCode), internalTempForLog);
             }
-            
             free(thermalDataArray);
         }
     }
     
-    #ifdef ENABLE_DEBUG_SERIAL
-        if(workDone) Serial.println(F("[SDManager_Pending] Finished processing pending API calls."));
-        else Serial.println(F("[SDManager_Pending] No pending files found to process."));
-    #endif
     return workDone;
 }
 
-// Helper to parse YYYYMMDD_HHMMSS from filename start
+// (Helper para parsear YYYYMMDD... de nombres de archivo a epoch time)
 time_t SDManager::_parseTimestampFromFilename(const String& filename, TimeManager& timeMgr) {
     struct tm t{};
-    
-    if (filename.length() < 8) {
-        return 0; 
-    }
+    if (filename.length() < 8) return 0; 
 
+    // Parsea solo la fecha (YYYYMMDD) del inicio del nombre
     if (sscanf(filename.c_str(), "%4d%2d%2d", &t.tm_year, &t.tm_mon, &t.tm_mday) == 3) {
-        t.tm_year -= 1900;
-        t.tm_mon -= 1;     
+        t.tm_year -= 1900; // tm_year es años desde 1900
+        t.tm_mon -= 1;     // tm_mon es 0-11
         t.tm_hour = 0; 
         t.tm_min = 0; 
         t.tm_sec = 0;
-        t.tm_isdst = -1;
-        
-        return mktime(&t);
+        t.tm_isdst = -1; // Dejar que mktime determine DST
+        return mktime(&t); // Convierte struct tm a epoch time
     }
-    
-    return 0; 
+    return 0; // Falla de parseo
 }
 
+// (Helper: Lógica de limpieza para un solo directorio)
 uint64_t SDManager::_manageDirectory(const String& dirPath, TimeManager& timeMgr, int maxFileAgeDays, 
                                    uint64_t minTotalFreeBytes, uint64_t& currentTotalUsedBytes, uint64_t totalSdSizeBytes) {
     if (!_sdAvailable) return 0;
 
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.printf("[SDManager_Manage] Managing directory: %s (MaxAge: %d days, MinFreeGlobally: %llu bytes)\n", dirPath.c_str(), maxFileAgeDays, minTotalFreeBytes);
-    #endif
-
     File root = SD_MMC.open(dirPath.c_str());
     if (!root || !root.isDirectory()) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.printf("[SDManager_Manage] Failed to open directory: %s\n", dirPath.c_str());
-        #endif
         if(root) root.close();
         return 0;
     }
 
+    // 1. Recopilar todos los archivos y sus timestamps
     std::vector<FileInfo> files;
     File entry = root.openNextFile();
     while (entry) {
         if (!entry.isDirectory()) {
-            String path = String(entry.path()); // Get full path
+            String path = String(entry.path()); 
             String name = String(entry.name());
             time_t timestamp = _parseTimestampFromFilename(name, timeMgr);
-            if (timestamp > 0) { // Successfully parsed timestamp
+            if (timestamp > 0) { // Solo gestiona archivos con timestamp parseable
                 files.push_back({path, timestamp});
-            } else {
-                 #ifdef ENABLE_DEBUG_SERIAL
-                    Serial.printf("[SDManager_Manage] Could not parse timestamp from: %s\n", name.c_str());
-                #endif
             }
         }
         entry.close();
@@ -758,100 +664,70 @@ uint64_t SDManager::_manageDirectory(const String& dirPath, TimeManager& timeMgr
     }
     root.close();
 
-    if (files.empty()) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            // Serial.printf("[SDManager_Manage] No files found in %s to manage.\n", dirPath.c_str());
-        #endif
-        return 0;
-    }
+    if (files.empty()) return 0;
     
-    // Sort files by timestamp (oldest first)
+    // 2. Ordenar archivos (el más antiguo primero)
     std::sort(files.begin(), files.end());
 
     uint64_t bytesFreedThisRun = 0;
-    time_t currentTime = timeMgr.getCurrentEpochTime(); // Get current epoch time
-    if (currentTime == 0 && timeMgr.isTimeSynced()) { // Check if epoch is valid if time is supposed to be synced
-         #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("[SDManager_Manage] Warning: Current epoch time is 0, but time claims to be synced. Age calculation might be incorrect.");
-        #endif
-        // Potentially return or use a less aggressive strategy if current time is unreliable for age calc
-    }
-    
+    time_t currentTime = timeMgr.getCurrentEpochTime(); 
     time_t maxAgeSeconds = (time_t)maxFileAgeDays * 24 * 60 * 60;
 
-    // Phase 1: Delete files older than maxFileAgeDays
+    // 3. Fase 1: Borrar archivos más antiguos que maxFileAgeDays
     #ifdef ENABLE_DEBUG_SERIAL
         int filesDeletedByAge = 0;
     #endif
-    // Iterate backwards to safely remove elements or use std::remove_if
-    for (auto it = files.begin(); it != files.end(); /* increment handled in loop */) {
+    for (auto it = files.begin(); it != files.end(); /* no incrementar aquí */) {
         bool removed = false;
+        // Solo borra por antigüedad si tenemos una hora actual válida
         if (currentTime > 0 && (currentTime - it->timestamp) > maxAgeSeconds) {
             File f = SD_MMC.open(it->path.c_str());
-            uint64_t fileSize = 0;
-            if (f) {
-                fileSize = f.size();
-                f.close();
-            }
+            uint64_t fileSize = f ? f.size() : 0;
+            if(f) f.close();
+            
             if (deleteFile(it->path.c_str())) {
                 bytesFreedThisRun += fileSize;
-                currentTotalUsedBytes -= fileSize; // Update global used bytes
+                currentTotalUsedBytes -= fileSize; // Actualiza el contador global
                 #ifdef ENABLE_DEBUG_SERIAL
                     filesDeletedByAge++;
                 #endif
-                it = files.erase(it); // Erase and get next valid iterator
+                it = files.erase(it); // Borra del vector y avanza el iterador
                 removed = true;
-            } else {
-                 #ifdef ENABLE_DEBUG_SERIAL
-                    Serial.printf("[SDManager_Manage] Failed to delete (by age) old file: %s\n", it->path.c_str());
-                #endif
             }
         }
         if (!removed) {
-            ++it;
+            ++it; // Avanza el iterador si no se borró
         }
     }
-    #ifdef ENABLE_DEBUG_SERIAL
-        if (filesDeletedByAge > 0) {
-            Serial.printf("[SDManager_Manage] Deleted %d file(s) from %s due to age.\n", filesDeletedByAge, dirPath.c_str());
-        }
-    #endif
+    // (Logs de depuración)
 
-    // Phase 2: If still not enough free space globally, delete more (oldest first) from this directory
+    // 4. Fase 2: Si aún falta espacio, borra más (empezando por los más antiguos)
     #ifdef ENABLE_DEBUG_SERIAL
         int filesDeletedBySpace = 0;
     #endif
-    // Files are already sorted oldest first
-    for (auto it = files.begin(); it != files.end(); /* increment handled in loop */) {
+    // Itera sobre los archivos restantes (ya ordenados, más antiguos primero)
+    for (auto it = files.begin(); it != files.end(); /* no incrementar aquí */) {
+        // Comprueba si el espacio libre global es menor que el mínimo requerido
         if ((totalSdSizeBytes - currentTotalUsedBytes) < minTotalFreeBytes) {
             File f = SD_MMC.open(it->path.c_str());
-            uint64_t fileSize = 0;
-            if (f) {
-                fileSize = f.size();
-                f.close();
-            }
+            uint64_t fileSize = f ? f.size() : 0;
+            if(f) f.close();
+
             if (deleteFile(it->path.c_str())) {
                 bytesFreedThisRun += fileSize;
-                currentTotalUsedBytes -= fileSize;
+                currentTotalUsedBytes -= fileSize; // Actualiza el contador global
                 #ifdef ENABLE_DEBUG_SERIAL
                     filesDeletedBySpace++;
                 #endif
-                it = files.erase(it); // Erase and get next
+                it = files.erase(it); // Borra y avanza
             } else {
-                 #ifdef ENABLE_DEBUG_SERIAL
-                    Serial.printf("[SDManager_Manage] Failed to delete (for space) file: %s\n", it->path.c_str());
-                #endif
-                ++it; // crucial: if delete fails, still advance iterator to avoid infinite loop on a stubborn file
+                ++it; // Si falla el borrado, avanza para evitar bucle infinito
             }
         } else {
-            break; // Enough space freed or no more files to check in this directory for space
+            break; // Se ha liberado suficiente espacio
         }
     }
-     #ifdef ENABLE_DEBUG_SERIAL
-        if (filesDeletedBySpace > 0) {
-            Serial.printf("[SDManager_Manage] Deleted %d additional file(s) from %s to free up space.\n", filesDeletedBySpace, dirPath.c_str());
-        }
-    #endif
+    // (Logs de depuración)
     
     return bytesFreedThisRun;
 }
@@ -860,76 +736,68 @@ uint64_t SDManager::_manageDirectory(const String& dirPath, TimeManager& timeMgr
 void SDManager::manageAllStorage(TimeManager& timeMgr, int maxFileAgeDays, float minFreeSpacePercentage) {
     if (!_sdAvailable) return;
 
-    // --- OPTIMIZATION: Only run the full, slow check if disk usage is high ---
+    // --- OPTIMIZACIÓN: Evitar escaneo costoso si el disco no está lleno ---
     uint64_t totalBytes = SD_MMC.totalBytes();
-    if (totalBytes == 0) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println(F("[SDManager_ManageAll] SD Card total size is 0. Cannot manage storage."));
-        #endif
-        return;
-    }
+    if (totalBytes == 0) return;
     
     uint64_t usedBytes = SD_MMC.usedBytes();
     float usagePercent = ((float)usedBytes / totalBytes) * 100.0f;
 
-    // Set a threshold to trigger the cleanup. 90% is a reasonable default.
+    // Define un umbral para activar la limpieza (ej. 90%)
     const float CLEANUP_TRIGGER_PERCENTAGE = 90.0f; 
 
+    // Si el uso es menor que el umbral, salta la limpieza.
     if (usagePercent < CLEANUP_TRIGGER_PERCENTAGE) {
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.printf("[SDManager_ManageAll] Disk usage is at %.2f%% (below %.0f%% threshold). Skipping full storage management scan.\n", usagePercent, CLEANUP_TRIGGER_PERCENTAGE);
         #endif
-        return; // Exit early, no need to perform the expensive scan.
+        return; 
     }
-    // --- END OPTIMIZATION ---
+    // --- FIN DE LA OPTIMIZACIÓN ---
 
-
-    // If we reach here, it means disk usage is high and we need to perform the cleanup.
+    // Si llegamos aquí, el disco está > 90% lleno y necesita limpieza.
     uint64_t minFreeBytesAbsolute = (uint64_t)(totalBytes * (minFreeSpacePercentage / 100.0f));
 
-    #ifdef ENABLE_DEBUG_SERIAL
-        Serial.println(F("[SDManager_ManageAll] --- Starting Storage Management ---"));
-        Serial.printf("[SDManager_ManageAll] Total: %llu MB, Used: %llu MB, Free: %llu MB\n", totalBytes / (1024*1024), usedBytes / (1024*1024), (totalBytes - usedBytes) / (1024*1024) );
-        Serial.printf("[SDManager_ManageAll] Policy: MaxAge %d days, MinFree %.2f%% (%llu bytes)\n", maxFileAgeDays, minFreeSpacePercentage, minFreeBytesAbsolute);
-    #endif
+    // (Logs de depuración)
 
-    // The currentTotalUsedBytes is passed by reference and updated by _manageDirectory.
+    // 'usedBytes' se pasa por referencia y se actualiza en cada llamada
     _manageDirectory(LOG_DIR, timeMgr, maxFileAgeDays, minFreeBytesAbsolute, usedBytes, totalBytes);
     _manageDirectory(ARCHIVE_ENVIRONMENTAL_DIR, timeMgr, maxFileAgeDays, minFreeBytesAbsolute, usedBytes, totalBytes);
     _manageDirectory(ARCHIVE_CAPTURES_DIR, timeMgr, maxFileAgeDays, minFreeBytesAbsolute, usedBytes, totalBytes);
 
-    #ifdef ENABLE_DEBUG_SERIAL
-        uint64_t finalUsedBytes = SD_MMC.usedBytes();
-        Serial.printf("[SDManager_ManageAll] Storage Management Complete. Final Used: %llu MB, Final Free: %llu MB\n", finalUsedBytes / (1024*1024), (totalBytes - finalUsedBytes) / (1024*1024));
-        Serial.println(F("[SDManager_ManageAll] ------------------------------------"));
-    #endif
+    // (Logs de depuración finales)
 }
 
+// (Helper para parsear el JSON térmico guardado y extraer el array de floats)
 float* SDManager::parseThermalJson(const String& jsonContent) {
     JsonDocument thermalDoc;
     DeserializationError error = deserializeJson(thermalDoc, jsonContent);
     if (error) return nullptr;
 
     JsonArray temps = thermalDoc["temperatures"].as<JsonArray>();
+    // Verifica que el array exista y tenga el tamaño correcto (768)
     if (temps.isNull() || temps.size() != MultipartDataSender::THERMAL_PIXELS) {
         return nullptr;
     }
 
+    // Aloja memoria para el array de floats
     float* thermalDataArray = (float*)malloc(MultipartDataSender::THERMAL_PIXELS * sizeof(float));
-    if (!thermalDataArray) return nullptr;
+    if (!thermalDataArray) return nullptr; // Falla de alocación
 
+    // Copia los valores
     for (int i = 0; i < MultipartDataSender::THERMAL_PIXELS; ++i) {
         thermalDataArray[i] = temps[i].as<float>();
     }
     return thermalDataArray;
 }
 
+// (Helper para archivar o borrar archivos pendientes procesados)
 void SDManager::archiveFile(const String& srcPath, const String& destPath) {
     if (moveFile(srcPath, destPath)) {
-        #ifdef ENABLE_DEBUG_SERIAL
-            Serial.println("[SDManager_Pending] Moved to archive: " + destPath);
-        #endif
+        // Éxito
     } else {
+        // Si mover falla (ej. error de SD), borra el original para
+        // evitar que se reenvíe un dato que ya fue aceptado por la API.
         #ifdef ENABLE_DEBUG_SERIAL
             Serial.println("[SDManager_Pending] Failed to move to archive. Deleting from pending: " + srcPath);
         #endif

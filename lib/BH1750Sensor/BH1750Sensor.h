@@ -1,64 +1,57 @@
 /**
  * @file BH1750Sensor.h
- * @brief Defines a wrapper class for the BH1750 light sensor.
+ * @brief Define una clase "wrapper" (envoltorio) para el sensor de luz BH1750.
  *
- * Provides an interface to initialize and read light levels from a BH1750 sensor
- * using a specific I2C bus instance.
+ * Simplifica la inicialización y lectura de un sensor BH1750
+ * sobre una instancia específica de bus I2C (TwoWire).
  */
-#ifndef BH1750_SENSOR_H // Renamed include guard for consistency
+#ifndef BH1750_SENSOR_H
 #define BH1750_SENSOR_H
 
 #include <Wire.h>
-#include <BH1750.h> // Include the library for the sensor
+#include <BH1750.h> // Librería base del sensor
 
 /**
  * @class BH1750Sensor
- * @brief Wrapper class simplifying the use of a BH1750 light sensor.
- *
- * This class encapsulates the BH1750 library object and provides methods
- * to initialize the sensor on a specific I2C bus and read light levels.
+ * @brief Clase wrapper que simplifica el uso del sensor de luz BH1750.
  */
 class BH1750Sensor {
   public:
     /**
-     * @brief Constructor for the BH1750 sensor wrapper.
-     * @param wire Reference to the TwoWire instance (I2C bus) the sensor is connected to.
-     * @param sda The SDA pin number used by the TwoWire instance. (Default: 47 for your project)
-     * @param scl The SCL pin number used by the TwoWire instance. (Default: 21 for your project)
-     * @note The actual pin assignment for the I2C bus must be done by calling
-     * `_wire.begin(sda, scl)` before calling `BH1750Sensor::begin()`.
-     * The sda/scl parameters here are primarily for reference within this class.
+     * @brief Constructor del wrapper para el sensor BH1750.
+     * @param wire Referencia a la instancia TwoWire (bus I2C) que utilizará el sensor.
+     * @param sda Pin SDA (meramente referencial).
+     * @param scl Pin SCL (meramente referencial).
+     *
+     * @note La configuración real de los pines I2C debe hacerse llamando
+     * a `_wire.begin(sda, scl)` antes de llamar a `BH1750Sensor::begin()`.
      */
     BH1750Sensor(TwoWire &wire, int sda = 47, int scl = 21);
 
     /**
-     * @brief Initializes the BH1750 sensor.
+     * @brief Inicializa el sensor BH1750 en el bus I2C especificado.
      *
-     * Configures the sensor using the BH1750 library. It sets the sensor to
-     * Continuous High Resolution Mode 2 (1 lx resolution, ~120ms measurement time)
-     * on the specified I2C address (0x23 by default) and uses the I2C bus instance
-     * provided in the constructor.
-     * @note This method must be called once (e.g., in `setup()`) after the I2C bus
-     * (`_wire`) has been initialized with `_wire.begin(sda, scl)`.
-     * @return true if initialization was successful, false otherwise.
+     * Configura el sensor en Modo Continuo de Alta Resolución 2 (1 lx, ~120ms)
+     * en la dirección I2C por defecto (0x23).
+     *
+     * @return true si la inicialización fue exitosa, false en caso contrario.
      */
     bool begin();
 
     /**
-     * @brief Reads the current ambient light level from the sensor.
+     * @brief Lee el nivel de luz ambiental actual.
      *
-     * Performs a measurement reading using the BH1750 library.
-     * @return The measured light level in lux (lx). Returns a negative value
-     * (typically -1 or -2 as defined by the BH1750 library) if the read failed
-     * or if the sensor is saturated/under range in certain modes (though less common in Mode 2).
+     * @return El nivel de luz medido en lux (lx).
+     * Retorna un valor negativo (definido por la librería BH1750, ej: -1 o -2)
+     * si la lectura falla.
      */
     float readLightLevel();
 
   private:
-    BH1750 lightMeter;   ///< @brief Instance of the underlying BH1750 library object.
-    int _sda;            ///< @brief SDA pin number (for reference; actual pin set via TwoWire::begin).
-    int _scl;            ///< @brief SCL pin number (for reference; actual pin set via TwoWire::begin).
-    TwoWire &_wire;      ///< @brief Reference to the I2C bus instance (e.g., Wire or Wire1) to be used.
+    BH1750 lightMeter;   ///< Instancia de la librería BH1750 subyacente.
+    int _sda;            ///< Pin SDA (solo para referencia).
+    int _scl;            ///< Pin SCL (solo para referencia).
+    TwoWire &_wire;      ///< Referencia al bus I2C (ej: Wire o Wire1) a utilizar.
 };
 
 #endif // BH1750_SENSOR_H

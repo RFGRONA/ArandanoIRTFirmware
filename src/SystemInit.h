@@ -1,13 +1,20 @@
-// src/SystemInit.h
+/**
+ * @file SystemInit.h
+ * @brief Prototipos de funciones para la inicialización robusta del sistema (Setup).
+ *
+ * Define las funciones auxiliares (helpers) que se llaman desde el `setup()`
+ * principal para inicializar hardware (Serie, I2C, Sensores) y servicios
+ * (WiFi, NTP) de manera secuencial y robusta, con manejo de fallos críticos.
+ */
 #ifndef SYSTEM_INIT_H
 #define SYSTEM_INIT_H
 
 #include <Arduino.h>
-// Include headers for types used in parameters for initializeSensors_Sys
-#include "DHT22Sensor.h"    
+// Inclusión de tipos de datos usados en los parámetros
+#include "BME280Sensor.h" 
+#include "OV2640Sensor.h"
 #include "BH1750Sensor.h"   
 #include "MLX90640Sensor.h" 
-#include "OV2640Sensor.h"
 #include "WiFiManager.h"    
 #include "LEDStatus.h"      
 #include "ConfigManager.h"  
@@ -15,59 +22,82 @@
 #include "SDManager.h"      
 #include "TimeManager.h"
 #include "CycleController.h" 
+#include "SDManager.h"
 
-// --- Function Prototypes for SystemInit ---
-/** @brief Initializes the Serial port for debugging if ENABLE_DEBUG_SERIAL is defined. */
+// --- Prototipos de Funciones de Inicialización del Sistema ---
+
+/**
+ * @brief Inicializa el puerto Serie (Serial) para depuración
+ * si `ENABLE_DEBUG_SERIAL` está definido.
+ */
 void initSerial_Sys();
 
-/** @brief Initializes I2C communication.
- * @param sdaPin The I2C SDA pin.
- * @param sclPin The I2C SCL pin.
- * @param frequency The I2C clock frequency.
+/**
+ * @brief Inicializa la comunicación I2C (Wire).
+ * @param sdaPin Pin I2C SDA.
+ * @param sclPin Pin I2C SCL.
+ * @param frequency Frecuencia del reloj I2C (ej. 100000).
  */
 void initI2C_Sys(int sdaPin, int sclPin, uint32_t frequency = 100000);
 
-
-/** @brief Initializes all hardware sensors sequentially.
- * @param dht The DHT22 sensor object.
- * @param light The BH1750 light sensor object (uses I2C initialized by initI2C_Sys).
- * @param thermal The MLX90640 thermal sensor object (uses I2C).
- * @param visCamera The OV2640 visual camera object.
- * @return True if all sensors initialized successfully.
+/**
+ * @brief Inicializa secuencialmente todos los sensores hardware.
+ *
+ * @param bme Sensor BME280 (Temp, Hum, Pres).
+ * @param light Sensor BH1750 (Luz) (usa I2C).
+ * @param thermal Sensor MLX90640 (Térmica) (usa I2C).
+ * @param visCamera Sensor OV2640 (Visual).
+ * @return String vacío ("") si todos los sensores inicializaron correctamente.
+ * Retorna un String con los nombres de los sensores que fallaron (ej. "BME280,MLX90640").
  */
-bool initializeSensors_Sys(DHT22Sensor& dht, BH1750Sensor& light, MLX90640Sensor& thermal, OV2640Sensor& visCamera);
-
-/** @brief Handles actions to take if sensor initialization fails.
- * This function will not return as it now halts the device.
- * It's expected that the calling code (e.g., main.cpp setup) sets the LED error state.
- */
-void handleSensorInitFailure_Sys();
+String initializeSensors_Sys(BME280Sensor& bme, BH1750Sensor& light, MLX90640Sensor& thermal, OV2640Sensor& visCamera);
 
 /**
- * @brief Initializes and robustly connects to WiFi with retries.
- * This function is blocking and will halt the device on critical failure. It does not return on failure.
- * @param wifiMgr Reference to the WiFiManager object.
- * @param led Reference to the LEDStatus object.
- * @param cfg Reference to the global Config object.
- * @param api_comm Pointer to the API communication object.
- * @param sdMgr Reference to the SDManager object (for logging connection failures).
- * @param timeMgr Reference to the TimeManager object (for logging connection failures).
- * @param visCamera Reference to OV2640Sensor (unused in new version, but kept for compatibility until main is refactored).
- * @return True if WiFi connected successfully.
+ * @brief Maneja el fallo crítico durante la inicialización de sensores.
+ *
+ * Registra el error en la SD, desmonta LittleFS y detiene la ejecución
+ * del dispositivo (entra en un bucle infinito `while(1)`).
+ * Esta función *no* retorna.
+ *
+ * @param sdManager Referencia al SDManager (para logs).
+ * @param timeManager Referencia al TimeManager (para logs).
+ * @param failedSensors El String devuelto por `initializeSensors_Sys` que lista los fallos.
+ */
+void handleSensorInitFailure_Sys(SDManager& sdManager, TimeManager& timeManager, const String& failedSensors);
+
+/**
+ * @brief Inicializa y conecta el WiFi de forma robusta (bloqueante, con reintentos).
+ *
+ * Implementa una lógica de reintentos con "backoff" exponencial.
+ * Si falla después de todos los reintentos, retorna `false`.
+ *
+ * @param wifiMgr Referencia al WiFiManager.
+ * @param led Referencia al LEDStatus.
+ * @param cfg Referencia a la Configuración global.
+ * @param api_comm Puntero al objeto API (para establecer la MAC).
+ * @param sdMgr Referencia al SDManager (para logs).
+ * @param timeMgr Referencia al TimeManager (para logs).
+ * @param visCamera (Parámetro obsoleto, mantenido por compatibilidad).
+ * @return true si el WiFi se conectó exitosamente, false si fallaron todos los reintentos.
  */
 bool initializeWiFi_Sys(WiFiManager& wifiMgr, LEDStatus& led, Config& cfg, API* api_comm, 
                         SDManager& sdMgr, TimeManager& timeMgr, OV2640Sensor& visCamera);
 
 /**
- * @brief Initializes and robustly syncs NTP time with retries.
- * This function is blocking and will halt the device on critical failure. It does not return on failure.
- * @param timeMgr Reference to the TimeManager object.
- * @param sdMgr Reference to the SDManager object (for logging sync status).
- * @param api_comm Pointer to the API communication object (for logging sync status).
- * @param cfg Reference to the global Config object (for API paths for logging).
- * @param gmtOffset_sec GMT offset in seconds for the local timezone.
- * @param daylightOffset_sec Daylight saving time offset in seconds.
- * @return True if NTP sync was successful.
+ * @brief Sincroniza la hora NTP de forma robusta (bloqueante, con reintentos).
+ *
+ * Asume que el WiFi ya está conectado.
+ * Si falla después de todos los reintentos, es un error fatal:
+ * registra el error y reinicia el dispositivo después de un largo retardo.
+ * Esta función *no* retorna si falla.
+ *
+ * @param timeMgr Referencia al TimeManager.
+ * @param sdMgr Referencia al SDManager (para logs).
+ * @param api_comm Puntero al objeto API (para logs).
+ * @param cfg Referencia a la Configuración global (para logs).
+ * @param gmtOffset_sec Desplazamiento GMT (zona horaria).
+ * @param daylightOffset_sec Desplazamiento por horario de verano.
+ * @return true si la sincronización NTP fue exitosa.
  */
 bool initializeNTP_Sys(TimeManager& timeMgr, SDManager& sdMgr, API* api_comm, Config& cfg,
                        long gmtOffset_sec, int daylightOffset_sec);
